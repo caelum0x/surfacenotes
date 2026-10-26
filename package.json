@@ -1,0 +1,45 @@
+{
+  "name": "surfacenotes",
+  "version": "0.1.0",
+  "description": "Changelog and release-notes generator for TypeScript library and SDK maintainers that verifies every breaking-change claim against a real diff of the package's public API surface, instead of trusting conventional-commit labels.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "surfacenotes": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js"
+  },
+  "keywords": [
+    "changelog",
+    "release-notes",
+    "changelog-generator",
+    "api-breaking-changes",
+    "semver",
+    "typescript",
+    "sdk",
+    "conventional-commits",
+    "git"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/caelum0x/surfacenotes.git"
+  },
+  "dependencies": {
+    "typescript": "^5.6.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "tsx": "^4.19.1"
+  }
+}
