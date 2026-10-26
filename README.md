@@ -52,6 +52,55 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   when it finds an undeclared breaking change, so it can gate a CI release
   job.
 
+## A real catch, not a canned demo
+
+Ran Surfacenotes against every real patch and minor tag-to-tag range in
+[`resend/resend-node`](https://github.com/resend/resend-node)'s actual public
+history (102 real version pairs, no cherry-picking) to find the exact kind of
+case this tool exists for: a release that reads as safe from its version
+number alone but genuinely changed the public type surface. 12 of 102 were
+flagged; the clearest one:
+
+**`v4.6.0` → `v4.7.0`** (a minor version bump) shipped
+[PR #535](https://github.com/resend/resend-node/pull/535), "update types to
+allow type narrowing" — and silently converted **22 response types**
+(`CreateApiKeyResponse`, `GetContactResponse`, `CreateDomainResponse`, and 19
+more) from a loosely-typed interface where `data`/`error` were both
+independently nullable:
+
+```ts
+export interface CreateApiKeyResponse {
+  data: CreateApiKeyResponseSuccess | null;
+  error: ErrorResponse | null;
+}
+```
+
+into a real discriminated union:
+
+```ts
+export type CreateApiKeyResponse =
+  | { data: CreateApiKeyResponseSuccess; error: null }
+  | { data: null; error: ErrorResponse };
+```
+
+That's a genuinely better type — but it's also a real breaking change for
+any caller whose code happened to rely on the old shape (e.g. constructing
+`{ data: null, error: null }` directly, or widening the type before
+narrowing it), and it shipped across the entire SDK's response surface with
+no `BREAKING CHANGE:` footer and no major version bump. Surfacenotes caught
+it because it diffs the actual exported type shape at both refs — not the
+commit message.
+
+Scanning also surfaced and fixed two real bugs in Surfacenotes itself along
+the way: a crash when an import specifier resolved to a git directory
+instead of a file (`src/git.ts`'s `existsAtRef` wasn't checking the git
+object was actually a blob), and a false positive where converting
+`interface X {...}` to `type X = {...}` (or the much more common real-world
+`type X = {...} & OtherNamedType` mixin pattern) was flagged as a breaking
+"kind change" even when the actual member shape didn't change. Both fixed
+and re-verified against the same real 102-pair scan before either number
+above was written down.
+
 ## What it intentionally does not do yet
 
 - No AI narrative rewrite pass is wired up in this MVP. The structured,

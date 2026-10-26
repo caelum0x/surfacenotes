@@ -14,6 +14,13 @@ interface MemberSurface {
 interface ExportSurface {
   name: string;
   kind: "class" | "function" | "interface" | "typeAlias" | "const" | "enum" | "unknown";
+  /** True for `interface X {...}` and `type X = {...}` (an object-literal
+   * alias) -- the two are structurally interchangeable for anyone consuming
+   * the shape, so converting between them isn't a real breaking change on
+   * its own. False for anything else a typeAlias might resolve to (union,
+   * primitive, mapped/conditional type, etc.), where a kind change really
+   * does mean "this is no longer the same kind of thing". */
+  objectShaped: boolean;
   members: MemberSurface[];
   paramsText: string | null;
   typeText: string;
@@ -147,14 +154,60 @@ function typeLiteralMembers(sf: ts.SourceFile, node: ts.TypeLiteralNode): Member
   return members;
 }
 
+/**
+ * Is `node` the kind of type-alias target that's structurally the same
+ * sort of thing as an interface -- so converting between the two isn't a
+ * real breaking change on its own? Handles the plain `type X = {...}` case
+ * and the much more common real-world `type X = {...} & OtherNamedType`
+ * mixin pattern (e.g. resend-node's `GetContactOptions = { audienceId:
+ * string } & SelectingField`). Deliberately excludes unions, function
+ * types, primitives, mapped/conditional types, and a bare reference with
+ * no literal anywhere in it -- those really are a different kind of thing
+ * than an interface, and a kind change there is real signal.
+ */
+function isObjectShapedTypeNode(node: ts.TypeNode): boolean {
+  if (ts.isTypeLiteralNode(node)) return true;
+  if (ts.isIntersectionTypeNode(node)) {
+    const hasLiteral = node.types.some((t) => ts.isTypeLiteralNode(t));
+    const hasIncompatible = node.types.some(
+      (t) => ts.isUnionTypeNode(t) || ts.isFunctionTypeNode(t) || ts.isConditionalTypeNode(t),
+    );
+    return hasLiteral && !hasIncompatible;
+  }
+  return false;
+}
+
+/** Collects members from every type-literal constituent of an intersection
+ * (e.g. the `{ audienceId: string }` half of `{...} & SelectingField`) --
+ * the named-reference half can't be resolved without full cross-file type
+ * resolution, so it's left out; this is a partial, heuristic surface, not
+ * an exhaustive one, consistent with the rest of this differ. */
+function objectShapedMembers(sf: ts.SourceFile, node: ts.TypeNode): MemberSurface[] {
+  if (ts.isTypeLiteralNode(node)) return typeLiteralMembers(sf, node);
+  if (ts.isIntersectionTypeNode(node)) {
+    return node.types
+      .filter((t): t is ts.TypeLiteralNode => ts.isTypeLiteralNode(t))
+      .flatMap((t) => typeLiteralMembers(sf, t));
+  }
+  return [];
+}
+
 function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string): ExportSurface {
   if (ts.isClassDeclaration(node)) {
-    return { name, kind: "class", members: classMembers(sf, node), paramsText: null, typeText: "class" };
+    return {
+      name,
+      kind: "class",
+      objectShaped: false,
+      members: classMembers(sf, node),
+      paramsText: null,
+      typeText: "class",
+    };
   }
   if (ts.isInterfaceDeclaration(node)) {
     return {
       name,
       kind: "interface",
+      objectShaped: true,
       members: interfaceMembers(sf, node),
       paramsText: null,
       typeText: "interface",
@@ -164,14 +217,23 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
     return {
       name,
       kind: "function",
+      objectShaped: false,
       members: [],
       paramsText: paramsSignature(sf, node.parameters),
       typeText: textOf(sf, node.type),
     };
   }
   if (ts.isTypeAliasDeclaration(node)) {
-    const members = ts.isTypeLiteralNode(node.type) ? typeLiteralMembers(sf, node.type) : [];
-    return { name, kind: "typeAlias", members, paramsText: null, typeText: textOf(sf, node.type) };
+    const objectShaped = isObjectShapedTypeNode(node.type);
+    const members = objectShaped ? objectShapedMembers(sf, node.type) : [];
+    return {
+      name,
+      kind: "typeAlias",
+      objectShaped,
+      members,
+      paramsText: null,
+      typeText: textOf(sf, node.type),
+    };
   }
   if (ts.isEnumDeclaration(node)) {
     const members = node.members.map((m) => ({
@@ -181,7 +243,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       paramsText: null,
       typeText: m.initializer ? textOf(sf, m.initializer) : "auto",
     }));
-    return { name, kind: "enum", members, paramsText: null, typeText: "enum" };
+    return { name, kind: "enum", objectShaped: false, members, paramsText: null, typeText: "enum" };
   }
   if (ts.isVariableDeclaration(node)) {
     const init = node.initializer;
@@ -189,14 +251,22 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       return {
         name,
         kind: "function",
+        objectShaped: false,
         members: [],
         paramsText: paramsSignature(sf, init.parameters),
         typeText: textOf(sf, init.type),
       };
     }
-    return { name, kind: "const", members: [], paramsText: null, typeText: node.type ? textOf(sf, node.type) : "inferred" };
+    return {
+      name,
+      kind: "const",
+      objectShaped: false,
+      members: [],
+      paramsText: null,
+      typeText: node.type ? textOf(sf, node.type) : "inferred",
+    };
   }
-  return { name, kind: "unknown", members: [], paramsText: null, typeText: "unknown" };
+  return { name, kind: "unknown", objectShaped: false, members: [], paramsText: null, typeText: "unknown" };
 }
 
 /** Find a top-level declaration named `name` anywhere in the file (exported or not). */
@@ -378,13 +448,21 @@ function diffSurfaces(oldMap: SurfaceMap, newMap: SurfaceMap): ApiChange[] {
     }
 
     if (oldSurface.kind !== newSurface.kind) {
-      changes.push({
-        kind: "export-removed",
-        severity: "breaking",
-        symbol: name,
-        detail: `Export "${name}" changed kind from ${oldSurface.kind} to ${newSurface.kind}.`,
-      });
-      continue;
+      // `interface X {...}` <-> `type X = {...}` is a pure declaration-
+      // syntax choice; consumers assigning/destructuring the shape can't
+      // tell the difference. Don't flag the kind change itself -- fall
+      // through to the member diff below, which still catches a real
+      // breaking change (a dropped or newly-required field) if one
+      // happened to ride along with the conversion.
+      if (!(oldSurface.objectShaped && newSurface.objectShaped)) {
+        changes.push({
+          kind: "export-removed",
+          severity: "breaking",
+          symbol: name,
+          detail: `Export "${name}" changed kind from ${oldSurface.kind} to ${newSurface.kind}.`,
+        });
+        continue;
+      }
     }
 
     if (oldSurface.kind === "function" || newSurface.paramsText !== null) {

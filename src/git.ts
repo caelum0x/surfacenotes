@@ -46,11 +46,21 @@ export function shortSha(repo: string, sha: string): string {
   return git(repo, ["rev-parse", "--short", sha]).trim();
 }
 
-/** Does `path` exist at `ref` in `repo`? */
+/**
+ * Does a real *file* (git blob) exist at `path` at `ref`? `cat-file -e`
+ * alone isn't enough: it also succeeds for directories, which are git tree
+ * objects with their own valid object id -- and `git show ref:some/dir`
+ * doesn't fail either, it returns a plain-text directory listing. Without
+ * the explicit blob check, a bare import specifier like `from "./foo"` that
+ * resolves to a real directory `foo/` (with its own `foo/index.ts` inside)
+ * gets misread as a resolved file, and that directory's listing text gets
+ * written to disk at the same path the real `foo/` subdirectory needs to
+ * occupy for its actual files -- crashing materializeSnapshot with EEXIST.
+ */
 function existsAtRef(repo: string, ref: string, filePath: string): boolean {
   try {
-    git(repo, ["cat-file", "-e", `${ref}:${filePath}`], { quiet: true });
-    return true;
+    const type = git(repo, ["cat-file", "-t", `${ref}:${filePath}`], { quiet: true }).trim();
+    return type === "blob";
   } catch {
     return false;
   }
