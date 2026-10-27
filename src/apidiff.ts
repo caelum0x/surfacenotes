@@ -454,6 +454,27 @@ function diffMembers(symbolName: string, oldMembers: MemberSurface[], newMembers
 
   for (const [name, newMember] of newByName) {
     if (!oldByName.has(name)) {
+      // A brand new member is genuinely additive for a *class* (existing
+      // instances/subclasses don't have to supply it) and for an optional
+      // member on any shape. But a new non-optional property/method on an
+      // `interface`/object-shaped `type` alias is breaking for every caller
+      // that builds the shape via an object literal (`const x: Foo = {...}`,
+      // a function parameter typed as `Foo`, etc.) -- TypeScript will now
+      // reject every one of those call sites for missing the new required
+      // field. Reuses the same `required-field-added` kind as the
+      // optional-to-required transition above since the caller impact is
+      // identical: a field that used to be omittable no longer is.
+      const isNewRequiredShapeMember =
+        (parentKind === "interface" || parentKind === "typeAlias") && !newMember.optional;
+      if (isNewRequiredShapeMember) {
+        changes.push({
+          kind: "required-field-added",
+          severity: "breaking",
+          symbol: `${symbolName}.${name}`,
+          detail: `${newMember.kind} "${name}" was added to ${symbolName} as required (not optional) — existing object literals typed as ${symbolName} that don't set it will now fail type-checking.`,
+        });
+        continue;
+      }
       changes.push({
         kind: "member-added",
         severity: "safe",
