@@ -289,6 +289,33 @@ function findLocalDeclaration(sf: ts.SourceFile, name: string): { node: ts.Node 
 }
 
 /**
+ * For a bare `export { X }` / `export type { X }` with no `from` clause, X's real origin is
+ * either a local declaration (handled by `findLocalDeclaration`) or an `import { X } from
+ * "./y"` elsewhere in the same file — common in hand-written barrels that only ever import a
+ * type to immediately re-export it, never declare it locally (e.g. `import type { Foo } from
+ * "./types"; export type { Foo };`). Without following this, the structural differ silently
+ * treats `Foo` as unresolved and the breaking-change check never sees it at all — a false
+ * negative, the one failure mode worse than a false positive for this tool's actual purpose.
+ * Handles `import { Foo as Bar }` aliasing; does not follow `import * as ns from` namespace
+ * imports (same documented heuristic-scope limit as the rest of this differ).
+ */
+function findImportSource(sf: ts.SourceFile, localName: string, root: string): { targetFile: string; importedName: string } | null {
+  for (const stmt of sf.statements) {
+    if (!ts.isImportDeclaration(stmt)) continue;
+    if (!stmt.moduleSpecifier || !ts.isStringLiteral(stmt.moduleSpecifier)) continue;
+    const namedBindings = stmt.importClause?.namedBindings;
+    if (!namedBindings || !ts.isNamedImports(namedBindings)) continue;
+    for (const el of namedBindings.elements) {
+      if (el.name.text !== localName) continue;
+      const importedName = (el.propertyName ?? el.name).text;
+      const targetFile = resolveLocalImport(sf.fileName, stmt.moduleSpecifier.text, root);
+      if (targetFile) return { targetFile, importedName };
+    }
+  }
+  return null;
+}
+
+/**
  * Resolve every export reachable from `entryFile`, following re-export
  * barrels (`export { X } from './y'`, `export * from './y'`) and local
  * declarations, into a flat map of exported-name -> structural surface.
@@ -338,6 +365,13 @@ function collectExports(
             const direct = findLocalDeclaration(sf, localName);
             if (direct) {
               result.set(exportedAs, surfaceFromDeclaration(sf, direct.node, exportedAs));
+              continue;
+            }
+            const imported = findImportSource(sf, localName, root);
+            const importedSurfaces = imported ? collectExports(imported.targetFile, root, unresolved, visited) : null;
+            const foundImported = imported && importedSurfaces?.get(imported.importedName);
+            if (foundImported) {
+              result.set(exportedAs, { ...foundImported, name: exportedAs });
             } else {
               unresolved.push(`${exportedAs} (local, via ${entryFile})`);
             }
