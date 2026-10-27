@@ -33,6 +33,17 @@ function verificationBanner(verification: VerificationResult, apiDiff: ApiDiffRe
   );
 }
 
+/**
+ * Labeled explicitly as AI-generated and explicitly scoped to "the commits above" — never
+ * presented as part of the verified structural-diff result, since that verification (see
+ * verificationBanner) is the one claim in this tool's output that must never be touched by a
+ * model that can hallucinate.
+ */
+function narrativeSection(narrative: string | undefined): string {
+  if (!narrative) return "";
+  return `_AI-generated summary of the commits above (not used for the verified check):_\n${narrative}\n`;
+}
+
 export function renderChangelog(opts: {
   version: string;
   date: string;
@@ -40,11 +51,13 @@ export function renderChangelog(opts: {
   verification: VerificationResult;
   apiDiff: ApiDiffResult;
   repoUrl?: string;
+  narrative?: string;
 }): string {
-  const { groups, verification, apiDiff, repoUrl } = opts;
+  const { groups, verification, apiDiff, repoUrl, narrative } = opts;
   const parts = [
     `## ${opts.version} — ${opts.date}`,
     "",
+    narrativeSection(narrative),
     verificationBanner(verification, apiDiff),
     section("Breaking changes", groups.breakingDeclared, repoUrl),
     section("Added", groups.feat, repoUrl),
@@ -64,8 +77,9 @@ export function renderReleaseNotes(opts: {
   groups: GroupedCommits;
   verification: VerificationResult;
   apiDiff: ApiDiffResult;
+  narrative?: string;
 }): string {
-  const { groups, verification, apiDiff } = opts;
+  const { groups, verification, apiDiff, narrative } = opts;
   const userLine = (c: ParsedCommit) => `- ${c.description}`;
   const userSection = (title: string, commits: ParsedCommit[]) =>
     commits.length === 0 ? "" : `### ${title}\n\n${commits.map(userLine).join("\n")}\n`;
@@ -73,6 +87,7 @@ export function renderReleaseNotes(opts: {
   const parts = [
     `## ${opts.version} — ${opts.date}`,
     "",
+    narrativeSection(narrative),
     verificationBanner(verification, apiDiff),
     userSection("What's new", groups.feat),
     userSection("Fixes", groups.fix),

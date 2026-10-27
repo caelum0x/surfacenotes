@@ -6,6 +6,7 @@ import { parseCommits, groupCommits } from "./commits.js";
 import { diffApiSurfaces } from "./apidiff.js";
 import { verify } from "./verify.js";
 import { renderChangelog, renderReleaseNotes } from "./changelog.js";
+import { generateNarrative, resolveAiConfig } from "./ai.js";
 
 interface Args {
   repo: string;
@@ -16,6 +17,7 @@ interface Args {
   outDir: string;
   repoUrl?: string;
   keepTemp: boolean;
+  ai: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -48,6 +50,7 @@ function parseArgs(argv: string[]): Args {
     outDir: path.resolve(args["out-dir"] ?? "."),
     repoUrl: args["repo-url"],
     keepTemp: args["keep-temp"] === "true",
+    ai: args.ai === "true",
   };
 }
 
@@ -70,6 +73,13 @@ function printUsage() {
       "  --out-dir <path>  Where to write CHANGELOG.md / RELEASE_NOTES.md (default: cwd)",
       "  --repo-url <url>  Base GitHub URL used to link PR numbers",
       "  --keep-temp       Keep the temporary API-surface snapshot directories for inspection",
+      "  --ai              Add an AI-written narrative summary, fed only the already-grouped",
+      "                    commit bullets (never raw diffs). Off by default, never required.",
+      "                    Configure via env: SURFACENOTES_AI_BASE_URL + SURFACENOTES_AI_API_KEY",
+      "                    (any OpenAI-compatible endpoint), or SURFACENOTES_AI_BASE_URL=ollama",
+      "                    for a local model, or just OPENAI_API_KEY for plain OpenAI. Missing",
+      "                    config is not an error: --ai silently falls back to the structured-only",
+      "                    output.",
     ].join("\n"),
   );
 }
@@ -120,6 +130,21 @@ async function main() {
 
   const verification = verify(apiDiff.changes, groups);
 
+  let narrative: string | null = null;
+  if (args.ai) {
+    const aiConfig = resolveAiConfig();
+    if (!aiConfig) {
+      console.error(
+        "[surfacenotes] --ai was passed but no AI endpoint is configured (set SURFACENOTES_AI_BASE_URL + " +
+          "SURFACENOTES_AI_API_KEY, SURFACENOTES_AI_BASE_URL=ollama for a local model, or OPENAI_API_KEY) " +
+          "— continuing with the structured-only output.",
+      );
+    } else {
+      console.error(`[surfacenotes] requesting AI narrative summary from ${aiConfig.baseUrl} (model ${aiConfig.model})`);
+      narrative = await generateNarrative(groups, aiConfig);
+    }
+  }
+
   const date = new Date().toISOString().slice(0, 10);
   const changelog = renderChangelog({
     version: args.version,
@@ -128,8 +153,16 @@ async function main() {
     verification,
     apiDiff,
     repoUrl: args.repoUrl,
+    narrative: narrative ?? undefined,
   });
-  const releaseNotes = renderReleaseNotes({ version: args.version, date, groups, verification, apiDiff });
+  const releaseNotes = renderReleaseNotes({
+    version: args.version,
+    date,
+    groups,
+    verification,
+    apiDiff,
+    narrative: narrative ?? undefined,
+  });
 
   mkdirSync(args.outDir, { recursive: true });
   writeFileSync(path.join(args.outDir, "CHANGELOG.md"), changelog, "utf8");
