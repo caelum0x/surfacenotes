@@ -3,11 +3,21 @@ import path from "node:path";
 import ts from "typescript";
 import type { ApiChange, ApiDiffResult } from "./types.js";
 
+/** One real function/method parameter, kept as structured data (not a
+ * serialized string) so comparisons never have to re-split text -- see
+ * `ParamSurface` usage note on `paramsSignature` for why that matters. */
+interface ParamSurface {
+  name: string;
+  optional: boolean;
+  typeText: string;
+}
+
 interface MemberSurface {
   name: string;
   kind: "method" | "property";
   optional: boolean;
   paramsText: string | null;
+  params: ParamSurface[] | null;
   typeText: string;
 }
 
@@ -23,6 +33,7 @@ interface ExportSurface {
   objectShaped: boolean;
   members: MemberSurface[];
   paramsText: string | null;
+  params: ParamSurface[] | null;
   typeText: string;
 }
 
@@ -68,14 +79,52 @@ function hasNamePrivateHash(name: ts.PropertyName | undefined): boolean {
   return !!name && ts.isPrivateIdentifier(name);
 }
 
+/**
+ * Structured per-parameter data for a function/method signature. This is
+ * what every structural comparison must use -- NOT a serialized "name:type,
+ * name:type" string re-split on ", ". A parameter's own type text can
+ * legitimately contain ", " (a two-arg generic like `Map<string, number>`,
+ * an inline object-type literal with multiple properties, a tuple, etc.),
+ * and splitting the joined string back apart on that separator miscounts
+ * the real parameter list -- confirmed as a real false positive via a
+ * synthetic repro: adding a harmless *optional* `b?: Map<string, number>`
+ * property to a function's existing object-typed parameter got misread as
+ * "gained a new required parameter" purely because of the comma inside
+ * `Map<string, number>`, and exited with the tool's own "VERIFIED BREAKING
+ * CHANGE" banner for a change that was actually 100% additive.
+ */
+function collectParams(sf: ts.SourceFile, params: readonly ts.ParameterDeclaration[]): ParamSurface[] {
+  return params.map((p) => ({
+    name: textOf(sf, p.name),
+    optional: !!p.questionToken || !!p.initializer,
+    typeText: textOf(sf, p.type),
+  }));
+}
+
+/** Human-readable "name:type, name:type" rendering for display only --
+ * never fed back into a structural comparison (see `collectParams`). */
+function formatParams(params: ParamSurface[]): string {
+  return params.map((p) => `${p.name}${p.optional ? "?" : ""}:${p.typeText}`).join(", ");
+}
+
 function paramsSignature(sf: ts.SourceFile, params: readonly ts.ParameterDeclaration[]): string {
-  return params
-    .map((p) => {
-      const optional = !!p.questionToken || !!p.initializer;
-      const typeText = textOf(sf, p.type);
-      return `${textOf(sf, p.name)}${optional ? "?" : ""}:${typeText}`;
-    })
-    .join(", ");
+  return formatParams(collectParams(sf, params));
+}
+
+/**
+ * Params appended after the old list's length that are themselves required
+ * (no `?`, no default). Operates on structured `ParamSurface[]`, never on a
+ * serialized string -- see `collectParams` for why that distinction is the
+ * actual fix here, not cosmetic.
+ */
+function newlyAddedRequiredParams(
+  oldParams: ParamSurface[] | null,
+  newParams: ParamSurface[] | null,
+): ParamSurface[] {
+  const oldList = oldParams ?? [];
+  const newList = newParams ?? [];
+  if (newList.length <= oldList.length) return [];
+  return newList.slice(oldList.length).filter((p) => !p.optional);
 }
 
 function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurface[] {
@@ -89,6 +138,7 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
         kind: "method",
         optional: !!m.questionToken,
         paramsText: paramsSignature(sf, m.parameters),
+        params: collectParams(sf, m.parameters),
         typeText: textOf(sf, m.type),
       });
     } else if (ts.isPropertyDeclaration(m) && m.name) {
@@ -97,6 +147,7 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
         kind: "property",
         optional: !!m.questionToken,
         paramsText: null,
+        params: null,
         typeText: m.type ? textOf(sf, m.type) : "inferred",
       });
     } else if (ts.isConstructorDeclaration(m)) {
@@ -105,6 +156,7 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
         kind: "method",
         optional: false,
         paramsText: paramsSignature(sf, m.parameters),
+        params: collectParams(sf, m.parameters),
         typeText: "void",
       });
     }
@@ -122,6 +174,7 @@ function interfaceMembers(sf: ts.SourceFile, decl: ts.InterfaceDeclaration): Mem
         kind: "property",
         optional: !!m.questionToken,
         paramsText: null,
+        params: null,
         typeText: textOf(sf, m.type),
       });
     } else if (ts.isMethodSignature(m)) {
@@ -130,6 +183,7 @@ function interfaceMembers(sf: ts.SourceFile, decl: ts.InterfaceDeclaration): Mem
         kind: "method",
         optional: !!m.questionToken,
         paramsText: paramsSignature(sf, m.parameters),
+        params: collectParams(sf, m.parameters),
         typeText: textOf(sf, m.type),
       });
     }
@@ -147,6 +201,7 @@ function typeLiteralMembers(sf: ts.SourceFile, node: ts.TypeLiteralNode): Member
         kind: "property",
         optional: !!m.questionToken,
         paramsText: null,
+        params: null,
         typeText: textOf(sf, m.type),
       });
     }
@@ -200,6 +255,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       objectShaped: false,
       members: classMembers(sf, node),
       paramsText: null,
+      params: null,
       typeText: "class",
     };
   }
@@ -210,6 +266,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       objectShaped: true,
       members: interfaceMembers(sf, node),
       paramsText: null,
+      params: null,
       typeText: "interface",
     };
   }
@@ -220,6 +277,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       objectShaped: false,
       members: [],
       paramsText: paramsSignature(sf, node.parameters),
+      params: collectParams(sf, node.parameters),
       typeText: textOf(sf, node.type),
     };
   }
@@ -232,6 +290,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       objectShaped,
       members,
       paramsText: null,
+      params: null,
       typeText: textOf(sf, node.type),
     };
   }
@@ -241,9 +300,10 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       kind: "property" as const,
       optional: false,
       paramsText: null,
+      params: null,
       typeText: m.initializer ? textOf(sf, m.initializer) : "auto",
     }));
-    return { name, kind: "enum", objectShaped: false, members, paramsText: null, typeText: "enum" };
+    return { name, kind: "enum", objectShaped: false, members, paramsText: null, params: null, typeText: "enum" };
   }
   if (ts.isVariableDeclaration(node)) {
     const init = node.initializer;
@@ -254,6 +314,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
         objectShaped: false,
         members: [],
         paramsText: paramsSignature(sf, init.parameters),
+        params: collectParams(sf, init.parameters),
         typeText: textOf(sf, init.type),
       };
     }
@@ -263,10 +324,11 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       objectShaped: false,
       members: [],
       paramsText: null,
+      params: null,
       typeText: node.type ? textOf(sf, node.type) : "inferred",
     };
   }
-  return { name, kind: "unknown", objectShaped: false, members: [], paramsText: null, typeText: "unknown" };
+  return { name, kind: "unknown", objectShaped: false, members: [], paramsText: null, params: null, typeText: "unknown" };
 }
 
 /** Find a top-level declaration named `name` anywhere in the file (exported or not). */
@@ -435,19 +497,14 @@ function diffMembers(symbolName: string, oldMembers: MemberSurface[], newMembers
     }
 
     if (oldMember.kind === "method" && newMember.kind === "method") {
-      const oldParams = (oldMember.paramsText ?? "").split(", ").filter(Boolean);
-      const newParams = (newMember.paramsText ?? "").split(", ").filter(Boolean);
-      if (newParams.length > oldParams.length) {
-        const added = newParams.slice(oldParams.length);
-        const anyRequired = added.some((p) => !p.includes("?:"));
-        if (anyRequired) {
-          changes.push({
-            kind: "signature-narrowed",
-            severity: "breaking",
-            symbol: `${symbolName}.${name}`,
-            detail: `${symbolName}.${name}() gained a new required parameter: ${added.join(", ")}.`,
-          });
-        }
+      const addedRequired = newlyAddedRequiredParams(oldMember.params, newMember.params);
+      if (addedRequired.length > 0) {
+        changes.push({
+          kind: "signature-narrowed",
+          severity: "breaking",
+          symbol: `${symbolName}.${name}`,
+          detail: `${symbolName}.${name}() gained a new required parameter: ${formatParams(addedRequired)}.`,
+        });
       }
     }
   }
@@ -520,20 +577,15 @@ function diffSurfaces(oldMap: SurfaceMap, newMap: SurfaceMap): ApiChange[] {
       }
     }
 
-    if (oldSurface.kind === "function" || newSurface.paramsText !== null) {
-      const oldParams = (oldSurface.paramsText ?? "").split(", ").filter(Boolean);
-      const newParams = (newSurface.paramsText ?? "").split(", ").filter(Boolean);
-      if (newParams.length > oldParams.length) {
-        const added = newParams.slice(oldParams.length);
-        const anyRequired = added.some((p) => !p.includes("?:"));
-        if (anyRequired) {
-          changes.push({
-            kind: "signature-narrowed",
-            severity: "breaking",
-            symbol: name,
-            detail: `${name}() gained a new required parameter: ${added.join(", ")}.`,
-          });
-        }
+    if (oldSurface.kind === "function" || newSurface.params !== null) {
+      const addedRequired = newlyAddedRequiredParams(oldSurface.params, newSurface.params);
+      if (addedRequired.length > 0) {
+        changes.push({
+          kind: "signature-narrowed",
+          severity: "breaking",
+          symbol: name,
+          detail: `${name}() gained a new required parameter: ${formatParams(addedRequired)}.`,
+        });
       }
     }
 
