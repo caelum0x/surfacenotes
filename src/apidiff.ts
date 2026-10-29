@@ -238,6 +238,56 @@ function typeLiteralMembers(sf: ts.SourceFile, node: ts.TypeLiteralNode): Member
 }
 
 /**
+ * Enum members, carrying each member's real *effective* value (not just its
+ * literal initializer text) so a value shift can be diffed later. A numeric
+ * enum member with no initializer isn't actually valueless -- TypeScript
+ * auto-assigns it `previousNumericValue + 1` (0 for the first member) -- so
+ * inserting a new member before an existing auto-numbered one silently
+ * renumbers every member after it, a real, citable TypeScript footgun
+ * (`enum Direction { Up, Down, Left, Right }` with `Down`/`Left`/`Right` all
+ * shifting by one once a member is inserted above them) that's genuinely
+ * breaking for any code or stored data comparing against the old numeric
+ * value, yet was previously invisible to this differ entirely: the old
+ * per-member text was literally the string `"auto"` on both sides of such a
+ * diff, so two differently-numbered enums compared as identical. Only the
+ * common, unambiguous auto-numbering chain (explicit numeric literal, or no
+ * initializer following one) is resolved; anything the TS auto-numbering
+ * rules themselves don't define cleanly (e.g. no initializer immediately
+ * after a string-valued member) is marked `"auto (unresolvable)"` and
+ * deliberately excluded from the value-changed comparison below, consistent
+ * with this differ's documented heuristic scope.
+ */
+function enumMembers(sf: ts.SourceFile, decl: ts.EnumDeclaration): MemberSurface[] {
+  let autoCounter = 0;
+  let autoCounterValid = true;
+  return decl.members.map((m) => {
+    let valueText: string;
+    if (m.initializer) {
+      valueText = textOf(sf, m.initializer);
+      if (ts.isNumericLiteral(m.initializer)) {
+        autoCounter = Number(m.initializer.text) + 1;
+        autoCounterValid = true;
+      } else {
+        autoCounterValid = false;
+      }
+    } else if (autoCounterValid) {
+      valueText = String(autoCounter);
+      autoCounter += 1;
+    } else {
+      valueText = "auto (unresolvable)";
+    }
+    return {
+      name: textOf(sf, m.name),
+      kind: "property" as const,
+      optional: false,
+      paramsText: null,
+      params: null,
+      typeText: valueText,
+    };
+  });
+}
+
+/**
  * Is `node` the kind of type-alias target that's structurally the same
  * sort of thing as an interface -- so converting between the two isn't a
  * real breaking change on its own? Handles the plain `type X = {...}` case
@@ -323,15 +373,15 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
     };
   }
   if (ts.isEnumDeclaration(node)) {
-    const members = node.members.map((m) => ({
-      name: textOf(sf, m.name),
-      kind: "property" as const,
-      optional: false,
+    return {
+      name,
+      kind: "enum",
+      objectShaped: false,
+      members: enumMembers(sf, node),
       paramsText: null,
       params: null,
-      typeText: m.initializer ? textOf(sf, m.initializer) : "auto",
-    }));
-    return { name, kind: "enum", objectShaped: false, members, paramsText: null, params: null, typeText: "enum" };
+      typeText: "enum",
+    };
   }
   if (ts.isVariableDeclaration(node)) {
     const init = node.initializer;
@@ -513,6 +563,20 @@ function diffMembers(symbolName: string, oldMembers: MemberSurface[], newMembers
         detail: `${oldMember.kind} "${name}" was removed from ${symbolName}.`,
       });
       continue;
+    }
+
+    if (
+      parentKind === "enum" &&
+      oldMember.typeText !== newMember.typeText &&
+      oldMember.typeText !== "auto (unresolvable)" &&
+      newMember.typeText !== "auto (unresolvable)"
+    ) {
+      changes.push({
+        kind: "enum-value-changed",
+        severity: "breaking",
+        symbol: `${symbolName}.${name}`,
+        detail: `Enum member "${name}" on ${symbolName} changed value from ${oldMember.typeText} to ${newMember.typeText} — any code or stored data comparing against the old value will no longer match.`,
+      });
     }
 
     if (oldMember.optional && !newMember.optional && (parentKind === "interface" || parentKind === "typeAlias")) {

@@ -37,7 +37,8 @@ export type ApiChangeKind =
   | "signature-widened"
   | "required-field-added"
   | "field-removed"
-  | "param-removed";
+  | "param-removed"
+  | "enum-value-changed";
 
 export type ApiChangeSeverity = "breaking" | "safe";
 

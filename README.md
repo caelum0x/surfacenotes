@@ -44,8 +44,12 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   read-only, no checkout, no worktree) and parses both snapshots with the
   real `typescript` compiler package.
 - Structurally diffs the two snapshots: removed exports/members are
-  breaking, new required parameters are breaking, an optional-to-required
-  field on an `interface`/`type` is breaking, everything additive is safe.
+  breaking, new required parameters (or a shrinking parameter list) are
+  breaking, an optional-to-required or newly-added-required field on an
+  `interface`/`type` is breaking, an `enum` member's real effective value
+  changing — including the classic "inserted a member above an
+  auto-numbered one and silently renumbered everything after it" footgun —
+  is breaking, everything additive is safe.
 - Writes `CHANGELOG.md` (developer-facing, with commit/PR links) and
   `RELEASE_NOTES.md` (same data, plain language, no hashes) with a
   verification banner at the top of each release. Exits with status `2`
@@ -148,8 +152,8 @@ above was written down.
 - The structural diff is a heuristic, not a full type-compatibility
   checker. It catches the common, high-value cases (removed exports,
   removed members, new required parameters, optional→required field
-  flips) and intentionally reports ambiguous type-text changes as
-  informational rather than guessing.
+  flips, enum member value shifts) and intentionally reports ambiguous
+  type-text changes as informational rather than guessing.
 - Only local (relative-path) imports are followed. Changes inside a
   dependency you re-export are out of scope for v0.1.0.
 
