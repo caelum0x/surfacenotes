@@ -563,16 +563,87 @@ function collectExports(
       continue;
     }
 
+    // `export default <expr>;` -- a distinct `ExportAssignment` node, not an
+    // `ExportDeclaration` and not a modifier on a class/function/etc, so it
+    // fell through every branch below and was completely invisible to the
+    // differ on both sides of a diff -- the same "invisible on both
+    // snapshots" false-negative class as the get/set accessor bug fixed in
+    // `60fca38`, just for a different AST shape. This is a real, common
+    // pattern for exactly the kind of package this tool targets (a client
+    // SDK's main class declared separately, then `export default Client;`
+    // at the bottom of the entry file -- e.g. stripe-node's historical
+    // `export default Stripe;`). Resolves the common real-world shapes:
+    // a plain identifier referring to a local declaration or a re-exported
+    // import (reusing `findLocalDeclaration`/`findImportSource` exactly as
+    // the bare `export { X }` path above does), or an inline anonymous
+    // function/arrow/class expression. Anything else (a call expression,
+    // object literal composed at runtime, etc.) is honestly reported as
+    // unresolved rather than silently dropped.
+    if (ts.isExportAssignment(stmt) && !stmt.isExportEquals) {
+      const expr = stmt.expression;
+      if (ts.isIdentifier(expr)) {
+        const direct = findLocalDeclaration(sf, expr.text);
+        if (direct) {
+          result.set("default", surfaceFromDeclaration(sf, direct.node, "default"));
+        } else {
+          const imported = findImportSource(sf, expr.text, root);
+          const importedSurfaces = imported ? collectExports(imported.targetFile, root, unresolved, visited) : null;
+          const foundImported = imported && importedSurfaces?.get(imported.importedName);
+          if (foundImported) {
+            result.set("default", { ...foundImported, name: "default" });
+          } else {
+            unresolved.push(`default export "${expr.text}" (via ${entryFile})`);
+          }
+        }
+      } else if (ts.isArrowFunction(expr) || ts.isFunctionExpression(expr)) {
+        result.set("default", {
+          name: "default",
+          kind: "function",
+          objectShaped: false,
+          members: [],
+          paramsText: paramsSignature(sf, expr.parameters),
+          params: collectParams(sf, expr.parameters),
+          typeText: textOf(sf, expr.type),
+        });
+      } else if (ts.isClassExpression(expr)) {
+        result.set("default", {
+          name: "default",
+          kind: "class",
+          objectShaped: false,
+          members: classMembers(sf, expr as unknown as ts.ClassDeclaration),
+          paramsText: null,
+          params: null,
+          typeText: "class",
+        });
+      } else {
+        unresolved.push(`default export expression (via ${entryFile}, not a resolvable shape)`);
+      }
+      continue;
+    }
+
     // direct `export class/function/interface/type/enum/const ...`
     const mods = ts.canHaveModifiers(stmt) ? ts.getModifiers(stmt) : undefined;
     const isExported = mods?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
     if (!isExported) continue;
+    // `export default class Foo {...}` / `export default function foo() {}`
+    // carry both the `export` and `default` modifiers on the same
+    // declaration (as opposed to the `ExportAssignment` form handled above).
+    // Before this, such a declaration got keyed by its *local* name (`Foo`)
+    // -- cosmetically wrong, and fatally wrong for the common anonymous form
+    // (`export default class { ... }`, `export default function () {}`),
+    // which has no name at all and was silently skipped entirely, invisible
+    // to the differ on both sides.
+    const isDefault = mods?.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword);
 
     if (
       ts.isClassDeclaration(stmt) || ts.isInterfaceDeclaration(stmt) || ts.isFunctionDeclaration(stmt) ||
       ts.isTypeAliasDeclaration(stmt) || ts.isEnumDeclaration(stmt)
     ) {
-      if (stmt.name) result.set(stmt.name.text, surfaceFromDeclaration(sf, stmt, stmt.name.text));
+      if (isDefault) {
+        result.set("default", surfaceFromDeclaration(sf, stmt, "default"));
+      } else if (stmt.name) {
+        result.set(stmt.name.text, surfaceFromDeclaration(sf, stmt, stmt.name.text));
+      }
     } else if (ts.isVariableStatement(stmt)) {
       for (const decl of stmt.declarationList.declarations) {
         if (ts.isIdentifier(decl.name)) {

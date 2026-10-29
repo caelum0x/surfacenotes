@@ -40,9 +40,12 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   Changed / Docs / Other. Commits without a recognizable `type:` prefix
   still show up under "Other" instead of being silently dropped.
 - Pulls the package's public entry file (and everything it locally
-  re-exports) at both refs straight out of git (`git show`/`git cat-file`,
-  read-only, no checkout, no worktree) and parses both snapshots with the
-  real `typescript` compiler package.
+  re-exports, including `export default` — both `export default class Foo
+  {...}`/`export default function foo() {...}` declarations and the
+  separate `class Foo {...}; export default Foo;` assignment form) at both
+  refs straight out of git (`git show`/`git cat-file`, read-only, no
+  checkout, no worktree) and parses both snapshots with the real
+  `typescript` compiler package.
 - Structurally diffs the two snapshots: removed exports/members (including
   `get`/`set` class accessors, not just methods and plain properties) are
   breaking, new required parameters (or a shrinking parameter list) are
