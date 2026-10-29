@@ -617,6 +617,32 @@ function interfaceMembers(sf: ts.SourceFile, decl: ts.InterfaceDeclaration): Mem
   return members;
 }
 
+/**
+ * Real false negative this differ previously had zero visibility into: a
+ * member declared with TypeScript's method-shorthand syntax inside a
+ * `TypeLiteral` (`type Handlers = { onData(chunk: string): void }`) parses
+ * as a distinct `ts.MethodSignature` AST node, not a `PropertySignature` --
+ * this loop only ever matched the latter, so a method-shaped member on an
+ * object-shaped `type` alias (or the type-literal half of an intersection,
+ * via `objectShapedMembers`) was silently dropped from the surface on BOTH
+ * snapshots, the same "invisible on both sides" failure class as the class
+ * accessor bug fixed in `60fca38`. This is a real, common real-world shape
+ * for exactly the kind of exported type this tool's audience writes (a
+ * typed event-handler/callback bag passed into an SDK method, e.g. `type
+ * Handlers = { onData(chunk: Buffer): void; onEnd(): void }`), as opposed to
+ * an `interface` declaring the same shape -- confirmed as a real gap via a
+ * synthetic repro (`/tmp/sn-typelit-method-test`, two tags): removing
+ * `onEnd()` entirely from such a type alias, committed as a mislabeled
+ * `fix:` with no `!`/`BREAKING CHANGE:` footer, printed "API diff found 0
+ * structural change(s)" and a clean "no breaking changes" verdict, exit 0 --
+ * before this fix, the member was never collected in the first place, so
+ * none of the file's existing per-member checks (which already treat a
+ * removed interface/type-alias member as breaking, consistently, via
+ * `diffMembers`'s generic `member-removed` path) ever ran against it.
+ * Mirrors `interfaceMembers`' `ts.isMethodSignature` handling exactly, since
+ * a type-literal method signature and an interface method signature are the
+ * same AST node kind with the same structural meaning.
+ */
 function typeLiteralMembers(sf: ts.SourceFile, node: ts.TypeLiteralNode): MemberSurface[] {
   const members: MemberSurface[] = [];
   for (const m of node.members) {
@@ -632,6 +658,18 @@ function typeLiteralMembers(sf: ts.SourceFile, node: ts.TypeLiteralNode): Member
         nullable: isNullableTypeNode(m.type),
         isStatic: false,
         readonly: hasReadonlyModifier(m),
+      });
+    } else if (ts.isMethodSignature(m)) {
+      members.push({
+        name: textOf(sf, m.name),
+        kind: "method",
+        optional: !!m.questionToken,
+        paramsText: paramsSignature(sf, m.parameters),
+        params: collectParams(sf, m.parameters),
+        typeText: textOf(sf, m.type),
+        nullable: isNullableTypeNode(m.type),
+        isStatic: false,
+        readonly: false,
       });
     }
   }

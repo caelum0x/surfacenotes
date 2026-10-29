@@ -87,7 +87,11 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   same type, nothing else about it changed) is breaking — confirmed against
   the real compiler (`TS2540: Cannot assign to '...' because it is a
   read-only property`); dropping `readonly` only loosens what callers may do
-  and is never flagged.
+  and is never flagged. A method declared with TypeScript's shorthand method
+  syntax inside an object-shaped `type` alias (e.g. `type Handlers = {
+  onData(chunk: string): void }`, as opposed to an arrow/function-typed
+  property) is diffed the same way as an `interface` method — removing one
+  is breaking.
 - Writes `CHANGELOG.md` (developer-facing, with commit/PR links) and
   `RELEASE_NOTES.md` (same data, plain language, no hashes) with a
   verification banner at the top of each release. Exits with status `2`
