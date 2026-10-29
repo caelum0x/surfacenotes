@@ -155,6 +155,40 @@ function arityNarrowed(oldParams: ParamSurface[] | null, newParams: ParamSurface
   return newList.length < oldList.length;
 }
 
+/**
+ * Existing parameters, matched by position (not name -- TypeScript resolves
+ * call-site argument compatibility positionally, not by the parameter's own
+ * name), that were optional (`?` or a default value) in the old signature
+ * and are required in the new one -- independent of `newlyAddedRequiredParams`
+ * (which only looks at params appended *past* the old list's length) and
+ * `arityNarrowed` (which only fires when the list gets strictly shorter).
+ * Neither of those catches the common real-world edit of tightening an
+ * *existing* parameter in place, e.g. `sendEmail(to: string, subject?:
+ * string)` -> `sendEmail(to: string, subject: string)`: the list length is
+ * unchanged on both sides, so `newlyAddedRequiredParams` sees nothing past
+ * the old length and `arityNarrowed` sees no shrink -- before this check
+ * existed, that edit printed "no structural change(s)" and let a mislabeled
+ * `fix:` through. Confirmed as a real break directly against the compiler
+ * (`tsc --strict`): a call site valid against the old signature
+ * (`sendEmail("a@b.com")`, omitting the now-required `subject`) produces a
+ * real `error TS2554: Expected 2 arguments, but got 1` against the new one.
+ */
+function paramNarrowedToRequired(
+  oldParams: ParamSurface[] | null,
+  newParams: ParamSurface[] | null,
+): ParamSurface[] {
+  const oldList = oldParams ?? [];
+  const newList = newParams ?? [];
+  const overlap = Math.min(oldList.length, newList.length);
+  const narrowed: ParamSurface[] = [];
+  for (let i = 0; i < overlap; i++) {
+    if (oldList[i].optional && !newList[i].optional) {
+      narrowed.push(newList[i]);
+    }
+  }
+  return narrowed;
+}
+
 function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurface[] {
   const members: MemberSurface[] = [];
   /** `get`/`set` accessors are a distinct `ts.ClassElement` kind from both
@@ -713,6 +747,15 @@ function diffMembers(symbolName: string, oldMembers: MemberSurface[], newMembers
           detail: `${symbolName}.${name}() now takes only ${(newMember.params ?? []).length} parameter(s), down from ${(oldMember.params ?? []).length} — existing callers passing more arguments than the new signature allows will fail to type-check.`,
         });
       }
+      const narrowedParams = paramNarrowedToRequired(oldMember.params, newMember.params);
+      if (narrowedParams.length > 0) {
+        changes.push({
+          kind: "param-became-required",
+          severity: "breaking",
+          symbol: `${symbolName}.${name}`,
+          detail: `${symbolName}.${name}()'s parameter(s) ${narrowedParams.map((p) => `"${p.name}"`).join(", ")} changed from optional to required — existing callers that omitted them will now fail to type-check.`,
+        });
+      }
     }
   }
 
@@ -799,6 +842,15 @@ function diffSurfaces(oldMap: SurfaceMap, newMap: SurfaceMap): ApiChange[] {
           severity: "breaking",
           symbol: name,
           detail: `${name}() now takes only ${(newSurface.params ?? []).length} parameter(s), down from ${(oldSurface.params ?? []).length} — existing callers passing more arguments than the new signature allows will fail to type-check.`,
+        });
+      }
+      const narrowedParams = paramNarrowedToRequired(oldSurface.params, newSurface.params);
+      if (narrowedParams.length > 0) {
+        changes.push({
+          kind: "param-became-required",
+          severity: "breaking",
+          symbol: name,
+          detail: `${name}()'s parameter(s) ${narrowedParams.map((p) => `"${p.name}"`).join(", ")} changed from optional to required — existing callers that omitted them will now fail to type-check.`,
         });
       }
     }

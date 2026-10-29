@@ -38,6 +38,7 @@ export type ApiChangeKind =
   | "required-field-added"
   | "field-removed"
   | "param-removed"
+  | "param-became-required"
   | "enum-value-changed";
 
 export type ApiChangeSeverity = "breaking" | "safe";

@@ -49,11 +49,14 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
 - Structurally diffs the two snapshots: removed exports/members (including
   `get`/`set` class accessors, not just methods and plain properties) are
   breaking, new required parameters (or a shrinking parameter list) are
-  breaking, an optional-to-required or newly-added-required field on an
-  `interface`/`type` is breaking, an `enum` member's real effective value
-  changing — including the classic "inserted a member above an
-  auto-numbered one and silently renumbered everything after it" footgun —
-  is breaking, everything additive is safe.
+  breaking, an *existing* parameter tightened from optional to required in
+  place (matched by position, e.g. `send(to, subject?)` -> `send(to,
+  subject)`, no change in parameter count) is breaking, an
+  optional-to-required or newly-added-required field on an `interface`/`type`
+  is breaking, an `enum` member's real effective value changing — including
+  the classic "inserted a member above an auto-numbered one and silently
+  renumbered everything after it" footgun — is breaking, everything additive
+  is safe.
 - Writes `CHANGELOG.md` (developer-facing, with commit/PR links) and
   `RELEASE_NOTES.md` (same data, plain language, no hashes) with a
   verification banner at the top of each release. Exits with status `2`
