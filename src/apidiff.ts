@@ -1008,6 +1008,24 @@ function collectExports(
         for (const [name, surface] of collectExports(targetFile, root, unresolved, visited)) {
           result.set(name, surface);
         }
+      } else if (stmt.exportClause && ts.isNamespaceExport(stmt.exportClause) && targetFile) {
+        // `export * as NS from "./y"` -- a distinct `NamespaceExport` exportClause kind,
+        // not `NamedExports` and not the `undefined` clause the `export * from` branch
+        // above checks for, so this fell through both branches and was completely
+        // invisible to the differ on both snapshots -- the same "invisible on both sides"
+        // false-negative class as the `export default` gap fixed in `5d2a88a`, just for a
+        // different re-export AST shape. A common real pattern for exactly this tool's
+        // audience: an SDK grouping its request/response types under a namespace, e.g.
+        // `export * as Types from "./types"`, then consumers import as
+        // `import { Types } from "pkg"; const x: Types.SendOptions = ...`. Every export
+        // under the namespace becomes reachable as "NS.subName", so it's tracked under
+        // that qualified key through the exact same diffSurfaces()/diffMembers() path as
+        // every other export -- the "." splits the same way rootSymbol() (verify.ts) and
+        // the existing class-member symbol format ("Client.send()") already expect.
+        const nsName = stmt.exportClause.name.text;
+        for (const [name, surface] of collectExports(targetFile, root, unresolved, visited)) {
+          result.set(`${nsName}.${name}`, { ...surface, name: `${nsName}.${name}` });
+        }
       }
       continue;
     }

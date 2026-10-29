@@ -42,10 +42,13 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
 - Pulls the package's public entry file (and everything it locally
   re-exports, including `export default` — both `export default class Foo
   {...}`/`export default function foo() {...}` declarations and the
-  separate `class Foo {...}; export default Foo;` assignment form) at both
-  refs straight out of git (`git show`/`git cat-file`, read-only, no
-  checkout, no worktree) and parses both snapshots with the real
-  `typescript` compiler package. Relative imports/re-exports that name a
+  separate `class Foo {...}; export default Foo;` assignment form, and
+  `export * as Types from "./types"` namespace re-exports, where every
+  export reachable through the namespace is tracked individually under a
+  qualified `Types.SendOptions`-style name) at both refs straight out of
+  git (`git show`/`git cat-file`, read-only, no checkout, no worktree) and
+  parses both snapshots with the real `typescript` compiler package.
+  Relative imports/re-exports that name a
   compiled `.js`/`.jsx`/`.mjs`/`.cjs` extension (the real `"moduleResolution":
   "nodenext"`/`"node16"` ESM convention, e.g. `export { X } from
   "./foo.js"` resolving to a real `foo.ts` — confirmed live against the real
