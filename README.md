@@ -82,7 +82,12 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   void {}`, same name, same params) is breaking in either direction —
   confirmed against the real compiler: existing callers written as
   `Client.send(x)` or `new Client().send(x)` fail to type-check against the
-  other shape, even though nothing else about the member changed.
+  other shape, even though nothing else about the member changed. A property
+  on an `interface`/`type`/class gaining the `readonly` modifier (same name,
+  same type, nothing else about it changed) is breaking — confirmed against
+  the real compiler (`TS2540: Cannot assign to '...' because it is a
+  read-only property`); dropping `readonly` only loosens what callers may do
+  and is never flagged.
 - Writes `CHANGELOG.md` (developer-facing, with commit/PR links) and
   `RELEASE_NOTES.md` (same data, plain language, no hashes) with a
   verification banner at the top of each release. Exits with status `2`

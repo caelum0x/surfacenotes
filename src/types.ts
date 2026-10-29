@@ -43,7 +43,8 @@ export type ApiChangeKind =
   | "type-param-narrowed"
   | "overload-removed"
   | "type-widened-nullable"
-  | "static-modifier-changed";
+  | "static-modifier-changed"
+  | "readonly-added";
 
 export type ApiChangeSeverity = "breaking" | "safe";
 

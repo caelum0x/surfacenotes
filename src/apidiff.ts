@@ -52,6 +52,17 @@ interface MemberSurface {
    * possibly identical params) is invisible to every other check in this
    * file, since none of them look at how the member is actually called. */
   isStatic: boolean;
+  /** True for a property carrying the `readonly` modifier (interface/
+   * type-literal property signatures, and class property declarations).
+   * Always `false` for methods/accessors/enum members, which have no such
+   * modifier. See the `readonly-added` check in `diffMembers` for the real
+   * break this exists to catch: a property gaining `readonly` between two
+   * snapshots keeps the same name/kind/type, so every other check in this
+   * file sees zero structural change, yet every existing writer
+   * (`instance.prop = x`) now fails to type-check. Deliberately one-
+   * directional -- going the other way (dropping `readonly`) only loosens
+   * what callers may do and is never flagged as breaking. */
+  readonly: boolean;
 }
 
 interface ExportSurface {
@@ -213,6 +224,18 @@ function hasNamePrivateHash(name: ts.PropertyName | undefined): boolean {
 function hasStaticModifier(member: ts.ClassElement): boolean {
   const mods = ts.canHaveModifiers(member) ? ts.getModifiers(member) : undefined;
   return !!mods?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword);
+}
+
+/**
+ * True when `node` (a class property declaration, or an interface/
+ * type-literal property *signature*) carries the `readonly` modifier.
+ * Checked the same way regardless of which of those three node kinds it
+ * is -- `ts.canHaveModifiers`/`ts.getModifiers` work generically across all
+ * of them, unlike `hasStaticModifier` above which is class-only.
+ */
+function hasReadonlyModifier(node: ts.Node): boolean {
+  const mods = ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined;
+  return !!mods?.some((m) => m.kind === ts.SyntaxKind.ReadonlyKeyword);
 }
 
 /**
@@ -510,6 +533,7 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
         typeText: m.type ? textOf(sf, m.type) : "inferred",
         nullable: isNullableTypeNode(m.type),
         isStatic: hasStaticModifier(m),
+        readonly: hasReadonlyModifier(m),
       });
     } else if (ts.isConstructorDeclaration(m)) {
       const list = callableByName.get("constructor") ?? [];
@@ -536,6 +560,8 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
       // is itself vanishingly rare and out of this differ's documented
       // heuristic scope.
       isStatic: hasStaticModifier(primary),
+      // Methods have no `readonly` modifier concept.
+      readonly: false,
     });
   }
   for (const [name, info] of accessors) {
@@ -548,6 +574,11 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
       typeText: info.typeText,
       nullable: info.nullable,
       isStatic: info.isStatic,
+      // A get/set accessor pair has no `readonly` *modifier* -- its
+      // writability is governed by whether a setter exists at all, a
+      // separate check outside this one's scope (see `readonly` field doc
+      // on `MemberSurface`).
+      readonly: false,
     });
   }
   return members;
@@ -567,6 +598,7 @@ function interfaceMembers(sf: ts.SourceFile, decl: ts.InterfaceDeclaration): Mem
         typeText: textOf(sf, m.type),
         nullable: isNullableTypeNode(m.type),
         isStatic: false,
+        readonly: hasReadonlyModifier(m),
       });
     } else if (ts.isMethodSignature(m)) {
       members.push({
@@ -578,6 +610,7 @@ function interfaceMembers(sf: ts.SourceFile, decl: ts.InterfaceDeclaration): Mem
         typeText: textOf(sf, m.type),
         nullable: isNullableTypeNode(m.type),
         isStatic: false,
+        readonly: false,
       });
     }
   }
@@ -598,6 +631,7 @@ function typeLiteralMembers(sf: ts.SourceFile, node: ts.TypeLiteralNode): Member
         typeText: textOf(sf, m.type),
         nullable: isNullableTypeNode(m.type),
         isStatic: false,
+        readonly: hasReadonlyModifier(m),
       });
     }
   }
@@ -652,6 +686,7 @@ function enumMembers(sf: ts.SourceFile, decl: ts.EnumDeclaration): MemberSurface
       typeText: valueText,
       nullable: false,
       isStatic: false,
+      readonly: false,
     };
   });
 }
@@ -1084,6 +1119,15 @@ function diffMembers(symbolName: string, oldMembers: MemberSurface[], newMembers
         detail: oldMember.isStatic
           ? `${symbolName}.${name} changed from a static member to an instance member — existing callers using "${symbolName}.${name}(...)" directly on the class will now fail to type-check; it must be called on an instance instead.`
           : `${symbolName}.${name} changed from an instance member to a static member — existing callers using "instance.${name}(...)" will now fail to type-check; it must be called on the class itself instead.`,
+      });
+    }
+
+    if (newMember.kind === "property" && !oldMember.readonly && newMember.readonly) {
+      changes.push({
+        kind: "readonly-added",
+        severity: "breaking",
+        symbol: `${symbolName}.${name}`,
+        detail: `"${name}" on ${symbolName} gained the "readonly" modifier — existing code that writes to it directly (e.g. "instance.${name} = ...") will now fail to type-check.`,
       });
     }
 
