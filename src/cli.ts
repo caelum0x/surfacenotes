@@ -8,6 +8,7 @@ import { verify } from "./verify.js";
 import { renderChangelog, renderReleaseNotes, mergeChangelogFile } from "./changelog.js";
 import { generateNarrative, resolveAiConfig } from "./ai.js";
 import { runWatch } from "./watch.js";
+import { withChangelogLock } from "./changelogLock.js";
 
 interface Args {
   repo: string;
@@ -220,12 +221,20 @@ async function main() {
   });
 
   mkdirSync(args.outDir, { recursive: true });
-  const changelogPath = path.join(args.outDir, "CHANGELOG.md");
-  const releaseNotesPath = path.join(args.outDir, "RELEASE_NOTES.md");
-  const existingChangelog = existsSync(changelogPath) ? readFileSync(changelogPath, "utf8") : null;
-  const existingReleaseNotes = existsSync(releaseNotesPath) ? readFileSync(releaseNotesPath, "utf8") : null;
-  writeFileSync(changelogPath, mergeChangelogFile(existingChangelog, changelog, args.version), "utf8");
-  writeFileSync(releaseNotesPath, mergeChangelogFile(existingReleaseNotes, releaseNotes, args.version), "utf8");
+  // Read-merge-write against CHANGELOG.md/RELEASE_NOTES.md is a classic TOCTOU race if two
+  // `generate` invocations target the same --out-dir at once (e.g. two CI jobs for two tags
+  // pushed close together, or a backfill script running several historical ranges in
+  // parallel) — whichever process writes last would otherwise silently clobber the other's
+  // freshly-merged release section. Serialize the whole read-merge-write sequence behind a
+  // cross-process lock scoped to --out-dir so that can't happen.
+  await withChangelogLock(args.outDir, () => {
+    const changelogPath = path.join(args.outDir, "CHANGELOG.md");
+    const releaseNotesPath = path.join(args.outDir, "RELEASE_NOTES.md");
+    const existingChangelog = existsSync(changelogPath) ? readFileSync(changelogPath, "utf8") : null;
+    const existingReleaseNotes = existsSync(releaseNotesPath) ? readFileSync(releaseNotesPath, "utf8") : null;
+    writeFileSync(changelogPath, mergeChangelogFile(existingChangelog, changelog, args.version), "utf8");
+    writeFileSync(releaseNotesPath, mergeChangelogFile(existingReleaseNotes, releaseNotes, args.version), "utf8");
+  });
   console.error(`[surfacenotes] wrote CHANGELOG.md and RELEASE_NOTES.md to ${args.outDir} (preserving prior release history)`);
 
   if (verification.undeclaredBreakingChange) {

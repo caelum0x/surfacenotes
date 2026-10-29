@@ -108,7 +108,14 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   release's section above whatever releases are already recorded there
   instead of overwriting the file — running `generate` again for the same
   version (e.g. on a different day) replaces that version's section in
-  place rather than duplicating it. Exits with status `2`
+  place rather than duplicating it. That read-merge-write sequence is
+  serialized behind a lock file scoped to `--out-dir`, so two `generate`
+  invocations targeting the same `--out-dir` at once (two CI jobs for two
+  tags pushed close together, or a backfill script running several
+  historical ranges in parallel) can't silently clobber each other's
+  release section — confirmed live: without the lock, two concurrent runs
+  reliably lost one release's entire section; with it, both always survive.
+  Exits with status `2`
   when it finds an undeclared breaking change, so it can gate a CI release
   job.
 - `surfacenotes watch` — a local dev-loop mode: diffs a baseline ref against
