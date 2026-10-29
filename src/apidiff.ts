@@ -10,6 +10,9 @@ interface ParamSurface {
   name: string;
   optional: boolean;
   typeText: string;
+  /** true for a `...rest` parameter -- see `arityNarrowed` for why this
+   * disables the fixed-arity-shrink check. */
+  rest: boolean;
 }
 
 interface MemberSurface {
@@ -98,6 +101,7 @@ function collectParams(sf: ts.SourceFile, params: readonly ts.ParameterDeclarati
     name: textOf(sf, p.name),
     optional: !!p.questionToken || !!p.initializer,
     typeText: textOf(sf, p.type),
+    rest: !!p.dotDotDotToken,
   }));
 }
 
@@ -125,6 +129,30 @@ function newlyAddedRequiredParams(
   const newList = newParams ?? [];
   if (newList.length <= oldList.length) return [];
   return newList.slice(oldList.length).filter((p) => !p.optional);
+}
+
+/**
+ * True when the new parameter list is strictly shorter than the old one and
+ * neither signature uses a rest parameter (`...args`). TypeScript enforces a
+ * hard max-argument-count check against any non-rest signature ("Expected N
+ * arguments, but got M") -- confirmed directly against the real compiler
+ * (`tsc --strict`) with a synthetic before/after: shrinking an exported
+ * `sendEmail(to, subject, body)` down to `sendEmail(to, subject)` makes
+ * `sendEmail("a", "b", "c")`, a call site that was valid against the old
+ * signature, a real compile error against the new one -- even though the
+ * removed parameter wasn't itself marked optional-to-required, nothing here
+ * previously checked for a *shrinking* parameter list at all, so this case
+ * printed "no breaking changes" and let a mislabeled `fix:` through.
+ * Skipped entirely when either signature has a rest parameter, since a rest
+ * parameter removes the fixed-arity ceiling this check depends on --
+ * consistent with this differ's documented heuristic scope (narrow and
+ * confident over exhaustive).
+ */
+function arityNarrowed(oldParams: ParamSurface[] | null, newParams: ParamSurface[] | null): boolean {
+  const oldList = oldParams ?? [];
+  const newList = newParams ?? [];
+  if (oldList.some((p) => p.rest) || newList.some((p) => p.rest)) return false;
+  return newList.length < oldList.length;
 }
 
 function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurface[] {
@@ -505,6 +533,13 @@ function diffMembers(symbolName: string, oldMembers: MemberSurface[], newMembers
           symbol: `${symbolName}.${name}`,
           detail: `${symbolName}.${name}() gained a new required parameter: ${formatParams(addedRequired)}.`,
         });
+      } else if (arityNarrowed(oldMember.params, newMember.params)) {
+        changes.push({
+          kind: "param-removed",
+          severity: "breaking",
+          symbol: `${symbolName}.${name}`,
+          detail: `${symbolName}.${name}() now takes only ${(newMember.params ?? []).length} parameter(s), down from ${(oldMember.params ?? []).length} — existing callers passing more arguments than the new signature allows will fail to type-check.`,
+        });
       }
     }
   }
@@ -585,6 +620,13 @@ function diffSurfaces(oldMap: SurfaceMap, newMap: SurfaceMap): ApiChange[] {
           severity: "breaking",
           symbol: name,
           detail: `${name}() gained a new required parameter: ${formatParams(addedRequired)}.`,
+        });
+      } else if (arityNarrowed(oldSurface.params, newSurface.params)) {
+        changes.push({
+          kind: "param-removed",
+          severity: "breaking",
+          symbol: name,
+          detail: `${name}() now takes only ${(newSurface.params ?? []).length} parameter(s), down from ${(oldSurface.params ?? []).length} — existing callers passing more arguments than the new signature allows will fail to type-check.`,
         });
       }
     }
