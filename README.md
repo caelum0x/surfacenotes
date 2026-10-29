@@ -106,6 +106,15 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   time a source file changes, so a breaking API edit is flagged the moment
   it's saved, not the next time someone remembers to run `generate` against
   a tag. See "Local dev loop" below.
+- Optional `--ai` narrative pass: rewrites the already-grouped, already-
+  deduplicated commit bullets into 2-4 plain sentences via any OpenAI-
+  compatible endpoint (your own key, a local Ollama model via
+  `SURFACENOTES_AI_BASE_URL=ollama`, or plain `OPENAI_API_KEY`). It never
+  sees a raw commit diff or source file, only the structured bullets this
+  tool already extracted — the anti-hallucination constraint this project's
+  own research flagged as mandatory. Off by default; a missing/misconfigured
+  endpoint degrades silently to the structured-only output rather than
+  erroring. See `--ai` in `surfacenotes generate --help` output above.
 
 ## Local dev loop: `surfacenotes watch`
 
@@ -188,13 +197,10 @@ above was written down.
 
 ## What it intentionally does not do yet
 
-- No AI narrative rewrite pass is wired up in this MVP. The structured,
-  already-deduplicated commit bullets are the right shape to *safely* feed
-  an AI rewrite later (constrained input avoids the "hallucination wearing
-  a changelog costume" failure mode found in research), but no hosted or
-  local model call ships in `v0.1.0` — nothing here should send your
-  commits to a third party. Hook it up in `src/changelog.ts` behind an
-  explicit `--ai` flag that points at a local/your-own endpoint when ready.
+- The `--ai` narrative pass (see above) is opt-in only and never a silent
+  default: with no `--ai` flag, and with no endpoint configured even when
+  `--ai` is passed, nothing is ever sent anywhere — nothing here should send
+  your commits to a third party without you explicitly asking it to.
 - The structural diff is a heuristic, not a full type-compatibility
   checker. It catches the common, high-value cases (removed exports,
   removed members, new required parameters, optional→required field
