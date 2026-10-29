@@ -584,8 +584,28 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
   return members;
 }
 
+/**
+ * Real false negative this differ previously had zero visibility into: an
+ * `interface` can declare a real TypeScript overload set on one method name
+ * (`interface Emitter { on(event: "data", cb: (chunk: Buffer) => void):
+ * void; on(event: "end", cb: () => void): void; }`) the exact same way a
+ * class or top-level function can -- already fixed for those two call
+ * sites (`classMembers`' `callableByName` grouping, and the top-level
+ * `overloadParams` wiring in `collectExports`) via the `overloadRemoved`
+ * check, but never ported here. Before this fix, this loop pushed one
+ * `MemberSurface` per `ts.MethodSignature`, all keyed by the same method
+ * name, which `diffMembers`'s `new Map(members.map((m) => [m.name, m]))`
+ * then silently collapsed down to whichever signature was pushed *last* --
+ * so an overloaded interface method's *other* declared call shapes were
+ * invisible to the structural diff on both snapshots, independent of
+ * whether any of them actually changed. Grouping every `MethodSignature`
+ * sharing a name into one `MemberSurface` carrying all of them via
+ * `overloadParams` (mirroring `classMembers` exactly) lets `overloadRemoved`
+ * run the same way it already does for class methods and functions.
+ */
 function interfaceMembers(sf: ts.SourceFile, decl: ts.InterfaceDeclaration): MemberSurface[] {
   const members: MemberSurface[] = [];
+  const methodsByName = new Map<string, ts.MethodSignature[]>();
   for (const m of decl.members) {
     if (!m.name) continue;
     if (ts.isPropertySignature(m)) {
@@ -601,18 +621,26 @@ function interfaceMembers(sf: ts.SourceFile, decl: ts.InterfaceDeclaration): Mem
         readonly: hasReadonlyModifier(m),
       });
     } else if (ts.isMethodSignature(m)) {
-      members.push({
-        name: textOf(sf, m.name),
-        kind: "method",
-        optional: !!m.questionToken,
-        paramsText: paramsSignature(sf, m.parameters),
-        params: collectParams(sf, m.parameters),
-        typeText: textOf(sf, m.type),
-        nullable: isNullableTypeNode(m.type),
-        isStatic: false,
-        readonly: false,
-      });
+      const name = textOf(sf, m.name);
+      const list = methodsByName.get(name) ?? [];
+      list.push(m);
+      methodsByName.set(name, list);
     }
+  }
+  for (const [name, sigs] of methodsByName) {
+    const primary = sigs[0];
+    members.push({
+      name,
+      kind: "method",
+      optional: !!primary.questionToken,
+      paramsText: paramsSignature(sf, primary.parameters),
+      params: collectParams(sf, primary.parameters),
+      overloadParams: sigs.map((s) => collectParams(sf, s.parameters)),
+      typeText: textOf(sf, primary.type),
+      nullable: isNullableTypeNode(primary.type),
+      isStatic: false,
+      readonly: false,
+    });
   }
   return members;
 }
@@ -645,6 +673,12 @@ function interfaceMembers(sf: ts.SourceFile, decl: ts.InterfaceDeclaration): Mem
  */
 function typeLiteralMembers(sf: ts.SourceFile, node: ts.TypeLiteralNode): MemberSurface[] {
   const members: MemberSurface[] = [];
+  // Same overload-collapse gap as `interfaceMembers` (see its doc comment)
+  // -- a `type` alias's own type-literal method-shorthand members can carry
+  // a real overload set just as easily as an `interface`'s can, and until
+  // now neither function grouped them, so only one shape per name ever
+  // reached `diffMembers`.
+  const methodsByName = new Map<string, ts.MethodSignature[]>();
   for (const m of node.members) {
     if (!m.name) continue;
     if (ts.isPropertySignature(m)) {
@@ -660,18 +694,26 @@ function typeLiteralMembers(sf: ts.SourceFile, node: ts.TypeLiteralNode): Member
         readonly: hasReadonlyModifier(m),
       });
     } else if (ts.isMethodSignature(m)) {
-      members.push({
-        name: textOf(sf, m.name),
-        kind: "method",
-        optional: !!m.questionToken,
-        paramsText: paramsSignature(sf, m.parameters),
-        params: collectParams(sf, m.parameters),
-        typeText: textOf(sf, m.type),
-        nullable: isNullableTypeNode(m.type),
-        isStatic: false,
-        readonly: false,
-      });
+      const name = textOf(sf, m.name);
+      const list = methodsByName.get(name) ?? [];
+      list.push(m);
+      methodsByName.set(name, list);
     }
+  }
+  for (const [name, sigs] of methodsByName) {
+    const primary = sigs[0];
+    members.push({
+      name,
+      kind: "method",
+      optional: !!primary.questionToken,
+      paramsText: paramsSignature(sf, primary.parameters),
+      params: collectParams(sf, primary.parameters),
+      overloadParams: sigs.map((s) => collectParams(sf, s.parameters)),
+      typeText: textOf(sf, primary.type),
+      nullable: isNullableTypeNode(primary.type),
+      isStatic: false,
+      readonly: false,
+    });
   }
   return members;
 }

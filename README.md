@@ -70,11 +70,13 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   new *optional* field riding along with the new type parameter — because it
   raises the number of explicit type arguments a usage like `Result<string>`
   must supply, everything additive is safe. A real declared TypeScript
-  overload set on an exported function or class method (`send(a: string):
-  void; send(a: Opts): void; send(a) { ... }`) is diffed as a full list of
-  call signatures, not collapsed to just one of them — losing a previously
-  declared call shape anywhere in that list (by structural match, not just
-  position, so reordering or adding an overload is still safe) is breaking.
+  overload set on an exported function, class method, `interface` method, or
+  object-shaped `type` alias's method-shorthand member (`send(a: string):
+  void; send(a: Opts): void; send(a) { ... }`, or the same shape declared on
+  an `interface`/`type`) is diffed as a full list of call signatures, not
+  collapsed to just one of them — losing a previously declared call shape
+  anywhere in that list (by structural match, not just position, so
+  reordering or adding an overload is still safe) is breaking.
   A property's declared type, or a function/method's declared return type,
   widening to include `undefined`/`null` where it didn't before (e.g.
   `name: string` -> `name: string | undefined`, or `getName(): string` ->
