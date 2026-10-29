@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import path from "node:path";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { collectCommits, materializeSnapshot, resolveRef } from "./git.js";
 import { parseCommits, groupCommits } from "./commits.js";
 import { diffApiSurfaces } from "./apidiff.js";
 import { verify } from "./verify.js";
-import { renderChangelog, renderReleaseNotes } from "./changelog.js";
+import { renderChangelog, renderReleaseNotes, mergeChangelogFile } from "./changelog.js";
 import { generateNarrative, resolveAiConfig } from "./ai.js";
 import { runWatch } from "./watch.js";
 
@@ -220,9 +220,13 @@ async function main() {
   });
 
   mkdirSync(args.outDir, { recursive: true });
-  writeFileSync(path.join(args.outDir, "CHANGELOG.md"), changelog, "utf8");
-  writeFileSync(path.join(args.outDir, "RELEASE_NOTES.md"), releaseNotes, "utf8");
-  console.error(`[surfacenotes] wrote CHANGELOG.md and RELEASE_NOTES.md to ${args.outDir}`);
+  const changelogPath = path.join(args.outDir, "CHANGELOG.md");
+  const releaseNotesPath = path.join(args.outDir, "RELEASE_NOTES.md");
+  const existingChangelog = existsSync(changelogPath) ? readFileSync(changelogPath, "utf8") : null;
+  const existingReleaseNotes = existsSync(releaseNotesPath) ? readFileSync(releaseNotesPath, "utf8") : null;
+  writeFileSync(changelogPath, mergeChangelogFile(existingChangelog, changelog, args.version), "utf8");
+  writeFileSync(releaseNotesPath, mergeChangelogFile(existingReleaseNotes, releaseNotes, args.version), "utf8");
+  console.error(`[surfacenotes] wrote CHANGELOG.md and RELEASE_NOTES.md to ${args.outDir} (preserving prior release history)`);
 
   if (verification.undeclaredBreakingChange) {
     console.error("[surfacenotes] ⚠️  undeclared breaking change detected — exiting with status 2");

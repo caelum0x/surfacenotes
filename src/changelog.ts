@@ -44,6 +44,47 @@ function narrativeSection(narrative: string | undefined): string {
   return `_AI-generated summary of the commits above (not used for the verified check):_\n${narrative}\n`;
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Merge a freshly-rendered release entry into whatever `CHANGELOG.md` /
+ * `RELEASE_NOTES.md` already exists on disk, instead of overwriting the
+ * whole file. Surfacenotes is meant to be run on every release of a real
+ * package, same as `git-cliff`/`release-please`/`conventional-changelog` —
+ * but unlike those tools, plain `writeFileSync` here silently destroyed
+ * every previously-recorded release's entry on the very next run (confirmed
+ * live: running `generate` for `v1.6.0..v1.6.1` then `v1.6.1..v1.6.2` into
+ * the same `--out-dir` left `CHANGELOG.md` containing only the v1.6.2
+ * section, with the v1.6.1 release — including its own verification
+ * banner — gone without a trace). A heading for `version` (`## <version> —
+ * <date>`) is searched for by `version` alone, not the full heading text
+ * with date, so re-running `generate` for the same version on a different
+ * day replaces that version's section in place (idempotent) rather than
+ * duplicating it; any other existing version keeps its original section
+ * untouched, and the new entry is prepended above it to preserve the
+ * reverse-chronological order every changelog convention expects.
+ */
+export function mergeChangelogFile(existing: string | null, newEntry: string, version: string): string {
+  const trimmedEntry = newEntry.trimEnd() + "\n";
+  if (!existing || !existing.trim()) return trimmedEntry;
+
+  const headingRe = new RegExp(`^## ${escapeRegExp(version)}\\b.*$`, "m");
+  const headingMatch = headingRe.exec(existing);
+  if (!headingMatch) return trimmedEntry + "\n" + existing.trimStart();
+
+  const sectionStart = headingMatch.index;
+  const nextHeadingRe = /^## /m;
+  const afterHeading = existing.slice(sectionStart + headingMatch[0].length);
+  const nextMatch = nextHeadingRe.exec(afterHeading);
+  const sectionEnd = nextMatch ? sectionStart + headingMatch[0].length + nextMatch.index : existing.length;
+
+  const before = existing.slice(0, sectionStart).trimEnd();
+  const after = existing.slice(sectionEnd).trimStart();
+  return [before, trimmedEntry, after].filter((part) => part.length > 0).join("\n\n").trimEnd() + "\n";
+}
+
 export function renderChangelog(opts: {
   version: string;
   date: string;
