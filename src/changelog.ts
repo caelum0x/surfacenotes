@@ -65,12 +65,24 @@ function escapeRegExp(s: string): string {
  * duplicating it; any other existing version keeps its original section
  * untouched, and the new entry is prepended above it to preserve the
  * reverse-chronological order every changelog convention expects.
+ *
+ * The heading match requires `version` to be followed by whitespace or end-of-line,
+ * not just a `\b` word boundary: `\b` also fires between a digit and a following
+ * `-`, so a plain `\b`-bounded match for version `1.7.2` previously matched the
+ * heading `## 1.7.2-hotfix.1 — <date>` too (the `-` after `2` is a non-word char,
+ * which is exactly what `\b` considers a boundary) — a real, common collision for
+ * this tool's own audience, who routinely tag prerelease/hotfix versions like
+ * `v4.7.0-beta.1` or `v1.7.2-hotfix.1` alongside the plain `v4.7.0`/`v1.7.2` they
+ * suffix. That false match caused `generate --version 1.7.2` to silently replace
+ * (not append after) the unrelated, already-shipped `1.7.2-hotfix.1` section —
+ * destroying real prior release history, the exact failure class the merge logic
+ * in this function exists to prevent.
  */
 export function mergeChangelogFile(existing: string | null, newEntry: string, version: string): string {
   const trimmedEntry = newEntry.trimEnd() + "\n";
   if (!existing || !existing.trim()) return trimmedEntry;
 
-  const headingRe = new RegExp(`^## ${escapeRegExp(version)}\\b.*$`, "m");
+  const headingRe = new RegExp(`^## ${escapeRegExp(version)}(?=\\s|$).*$`, "m");
   const headingMatch = headingRe.exec(existing);
   if (!headingMatch) return trimmedEntry + "\n" + existing.trimStart();
 
