@@ -45,7 +45,12 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   separate `class Foo {...}; export default Foo;` assignment form) at both
   refs straight out of git (`git show`/`git cat-file`, read-only, no
   checkout, no worktree) and parses both snapshots with the real
-  `typescript` compiler package.
+  `typescript` compiler package. Relative imports/re-exports that name a
+  compiled `.js`/`.jsx`/`.mjs`/`.cjs` extension (the real `"moduleResolution":
+  "nodenext"`/`"node16"` ESM convention, e.g. `export { X } from
+  "./foo.js"` resolving to a real `foo.ts` — confirmed live against the real
+  `@octokit/core` source) resolve to their real TS source file instead of
+  silently failing to resolve at all.
 - Structurally diffs the two snapshots: removed exports/members (including
   `get`/`set` class accessors, not just methods and plain properties) are
   breaking, new required parameters (or a shrinking parameter list) are

@@ -68,7 +68,34 @@ interface ExportSurface {
 
 type SurfaceMap = Map<string, ExportSurface>;
 
-const RESOLVE_CANDIDATES = (p: string) => [p, `${p}.ts`, `${p}.tsx`, `${p}/index.ts`, `${p}/index.tsx`];
+/**
+ * See the identical constant in `git.ts` for the full rationale: a relative
+ * specifier naming a compiled `.js`/`.jsx`/`.mjs`/`.cjs` extension (the
+ * `"moduleResolution": "nodenext"`/`"node16"` convention) must resolve to the
+ * real `.ts`/`.tsx`/`.mts`/`.cts` source file on disk, not fail to resolve at
+ * all. This copy operates on the already-materialized snapshot files on disk
+ * (used by `resolveLocalImport`, e.g. for re-export-barrel and
+ * `findImportSource` resolution) rather than on git blobs, so it's kept as a
+ * separate small function rather than a shared import -- consistent with how
+ * `RESOLVE_CANDIDATES` was already duplicated between the two files before
+ * this fix.
+ */
+const JS_OUTPUT_EXT_TO_SOURCE_EXT: Record<string, string[]> = {
+  ".js": [".ts", ".tsx"],
+  ".jsx": [".tsx"],
+  ".mjs": [".mts"],
+  ".cjs": [".cts"],
+};
+
+const RESOLVE_CANDIDATES = (p: string) => {
+  const ext = path.extname(p);
+  const sourceExts = JS_OUTPUT_EXT_TO_SOURCE_EXT[ext];
+  if (sourceExts) {
+    const base = p.slice(0, p.length - ext.length);
+    return [p, ...sourceExts.map((sourceExt) => `${base}${sourceExt}`)];
+  }
+  return [p, `${p}.ts`, `${p}.tsx`, `${p}/index.ts`, `${p}/index.tsx`];
+};
 
 function resolveLocalImport(fromFile: string, specifier: string, root: string): string | null {
   if (!specifier.startsWith(".")) return null;

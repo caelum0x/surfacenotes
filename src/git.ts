@@ -74,13 +74,47 @@ function readAtRef(repo: string, ref: string, filePath: string): string | null {
   }
 }
 
-const RESOLVE_CANDIDATES = (p: string) => [
-  p,
-  `${p}.ts`,
-  `${p}.tsx`,
-  `${p}/index.ts`,
-  `${p}/index.tsx`,
-];
+/**
+ * A relative specifier's own output-extension mapped to the real TS source
+ * extension(s) that are allowed to satisfy it under TypeScript's
+ * standards-documented `"moduleResolution": "nodenext"`/`"node16"` convention
+ * (https://www.typescriptlang.org/docs/handbook/esm-node.html): you write the
+ * specifier with the *compiled* extension (`.js`) even though the real source
+ * file on disk is `.ts` -- e.g. `import { X } from "./foo.js"` resolving to a
+ * real `foo.ts`. Confirmed as a real, common pattern directly against a real
+ * TypeScript SDK in this tool's own target audience: `@octokit/core`'s real
+ * `src/index.ts` has `import { VERSION } from "./version.js";` and `export
+ * type { OctokitOptions } from "./types.js";`, both resolving to real `.ts`
+ * files, never a `.js` file.
+ */
+const JS_OUTPUT_EXT_TO_SOURCE_EXT: Record<string, string[]> = {
+  ".js": [".ts", ".tsx"],
+  ".jsx": [".tsx"],
+  ".mjs": [".mts"],
+  ".cjs": [".cts"],
+};
+
+/**
+ * Candidate repo-relative file paths a resolved import specifier `p` might
+ * really be. Tries `p` as-is first (covers a real, literally-committed `.js`/
+ * `.mjs`/`.cjs` file, and any specifier with no extension at all alongside the
+ * usual extensionless-import candidates), then -- for a specifier that names a
+ * compiled-JS extension -- the real TS source extension(s) that convention
+ * actually points at (see `JS_OUTPUT_EXT_TO_SOURCE_EXT`). Without the second
+ * step, every file reachable only through a `.js`-suffixed relative import
+ * (the modern `nodenext`/`node16` ESM convention) was silently never pulled
+ * into either snapshot at all -- its whole exported surface invisible to the
+ * structural diff on both sides, not just masked on one.
+ */
+const RESOLVE_CANDIDATES = (p: string) => {
+  const ext = path.posix.extname(p);
+  const sourceExts = JS_OUTPUT_EXT_TO_SOURCE_EXT[ext];
+  if (sourceExts) {
+    const base = p.slice(0, p.length - ext.length);
+    return [p, ...sourceExts.map((sourceExt) => `${base}${sourceExt}`)];
+  }
+  return [p, `${p}.ts`, `${p}.tsx`, `${p}/index.ts`, `${p}/index.tsx`];
+};
 
 /**
  * Resolve a relative import specifier (e.g. "./src/usesend") against the
