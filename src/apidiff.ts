@@ -157,9 +157,43 @@ function arityNarrowed(oldParams: ParamSurface[] | null, newParams: ParamSurface
 
 function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurface[] {
   const members: MemberSurface[] = [];
+  /** `get`/`set` accessors are a distinct `ts.ClassElement` kind from both
+   * `MethodDeclaration` and `PropertyDeclaration` -- before this, the loop
+   * below only matched those two plus the constructor, so an accessor fell
+   * through every branch and was silently dropped from the surface on both
+   * sides of a diff. Confirmed as a real false negative via a synthetic
+   * repro: removing an exported class's only public member, `get
+   * apiVersion(): string`, printed "0 structural change(s)" and a clean
+   * "API verified: no breaking changes" banner, exit 0 -- a real breaking
+   * removal (every external `instance.apiVersion` read now fails to
+   * type-check) that the tool's own purpose is to catch, missed because
+   * the member was invisible on both the old and new snapshot, not just
+   * one of them. A get/set pair sharing a name is merged into one
+   * `MemberSurface` here (keyed below) the same way TypeScript itself
+   * treats them as a single property from the outside.
+   */
+  const accessors = new Map<string, { typeText: string }>();
   for (const m of decl.members) {
     if (hasNamePrivateHash(m.name as ts.PropertyName | undefined)) continue;
     if (!isPublicMember(m)) continue;
+    if ((ts.isGetAccessorDeclaration(m) || ts.isSetAccessorDeclaration(m)) && m.name) {
+      const name = textOf(sf, m.name);
+      const typeText = ts.isGetAccessorDeclaration(m)
+        ? m.type
+          ? textOf(sf, m.type)
+          : "inferred"
+        : m.parameters[0]?.type
+          ? textOf(sf, m.parameters[0].type)
+          : "inferred";
+      // Prefer the getter's type when both a getter and setter share a
+      // name -- that's the type an external reader (`const x =
+      // instance.prop`) actually observes. A setter-only accessor (write
+      // without read) falls back to its parameter's type.
+      if (!accessors.has(name) || ts.isGetAccessorDeclaration(m)) {
+        accessors.set(name, { typeText });
+      }
+      continue;
+    }
     if (ts.isMethodDeclaration(m) && m.name) {
       members.push({
         name: textOf(sf, m.name),
@@ -188,6 +222,9 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
         typeText: "void",
       });
     }
+  }
+  for (const [name, info] of accessors) {
+    members.push({ name, kind: "property", optional: false, paramsText: null, params: null, typeText: info.typeText });
   }
   return members;
 }

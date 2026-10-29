@@ -43,7 +43,8 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   re-exports) at both refs straight out of git (`git show`/`git cat-file`,
   read-only, no checkout, no worktree) and parses both snapshots with the
   real `typescript` compiler package.
-- Structurally diffs the two snapshots: removed exports/members are
+- Structurally diffs the two snapshots: removed exports/members (including
+  `get`/`set` class accessors, not just methods and plain properties) are
   breaking, new required parameters (or a shrinking parameter list) are
   breaking, an optional-to-required or newly-added-required field on an
   `interface`/`type` is breaking, an `enum` member's real effective value
