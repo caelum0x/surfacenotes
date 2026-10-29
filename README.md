@@ -96,7 +96,12 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   syntax inside an object-shaped `type` alias (e.g. `type Handlers = {
   onData(chunk: string): void }`, as opposed to an arrow/function-typed
   property) is diffed the same way as an `interface` method — removing one
-  is breaking.
+  is breaking. An `interface`/`type`/class's own index signature (`[key:
+  string]: T`, e.g. a headers/options bag) is tracked too: removing it, or
+  changing its value type in either direction (narrowing *or* widening,
+  e.g. `string | number` -> `string`), is breaking — confirmed against the
+  real compiler both ways; adding one where there wasn't one before is
+  purely additive and safe.
 - Writes `CHANGELOG.md` (developer-facing, with commit/PR links) and
   `RELEASE_NOTES.md` (same data, plain language, no hashes) with a
   verification banner at the top of each release, prepending each new

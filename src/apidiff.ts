@@ -25,6 +25,17 @@ interface TypeParamSurface {
   hasDefault: boolean;
 }
 
+/**
+ * Sentinel name used for an interface/type-literal/class's own index
+ * signature (`[key: string]: T`), which has no `.name` node at all -- see
+ * `collectIndexSignature` for the real break this exists to catch. Matches
+ * the terminology TypeScript's own compiler diagnostics use ("Index
+ * signature for type 'string' is missing...") so a reader of a generated
+ * changelog recognizes it immediately. Deliberately not a valid TS
+ * identifier so it can never collide with a real member name.
+ */
+const INDEX_SIGNATURE_MEMBER_NAME = "(index signature)";
+
 interface MemberSurface {
   name: string;
   kind: "method" | "property";
@@ -236,6 +247,47 @@ function hasStaticModifier(member: ts.ClassElement): boolean {
 function hasReadonlyModifier(node: ts.Node): boolean {
   const mods = ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined;
   return !!mods?.some((m) => m.kind === ts.SyntaxKind.ReadonlyKeyword);
+}
+
+/**
+ * Build the `MemberSurface` for an interface/type-literal/class's own index
+ * signature (`[key: string]: T`), if `m` is one -- `null` otherwise. Before
+ * this, `interfaceMembers`/`typeLiteralMembers`/`classMembers` each started
+ * their loop body with `if (!m.name) continue;` (or an equivalent cast), and
+ * `ts.IndexSignatureDeclaration` is the one real `ClassElement`/`TypeElement`
+ * kind with no `.name` node at all -- so an index signature was silently
+ * dropped from the surface on BOTH snapshots of every diff, the same
+ * "invisible on both sides" failure class as the class-accessor gap fixed in
+ * `60fca38` and the `export default` gap fixed in `5d2a88a`. This is a real,
+ * common SDK shape (a headers/options bag typed as `interface Headers {
+ * [key: string]: string }`), and both narrowing *and* widening its value
+ * type are genuinely breaking in different directions -- confirmed directly
+ * against the real compiler (`tsc --strict`): narrowing `string | number` to
+ * `string` rejects an existing caller that assigns a number
+ * (`error TS2322`), and widening `string` to `string | number` just as
+ * surely rejects an existing caller that reads a value and assigns it to a
+ * `string` (same error, opposite direction) -- so any change at all is
+ * flagged, the same unconditional-on-either-direction approach already used
+ * for `enum-value-changed` and `static-modifier-changed`. `optional` is
+ * always `true` here (never `false`) so a newly-*added* index signature
+ * falls through `diffMembers`'s generic `member-added` path as safe (it only
+ * ever grants callers more freedom, never requires anything new of an
+ * existing object literal) instead of being misclassified as a breaking
+ * `required-field-added` the way a real new required field correctly is.
+ */
+function collectIndexSignature(sf: ts.SourceFile, m: ts.ClassElement | ts.TypeElement): MemberSurface | null {
+  if (!ts.isIndexSignatureDeclaration(m)) return null;
+  return {
+    name: INDEX_SIGNATURE_MEMBER_NAME,
+    kind: "property",
+    optional: true,
+    paramsText: null,
+    params: null,
+    typeText: textOf(sf, m.type),
+    nullable: isNullableTypeNode(m.type),
+    isStatic: hasStaticModifier(m),
+    readonly: hasReadonlyModifier(m),
+  };
 }
 
 /**
@@ -503,6 +555,11 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
    */
   const callableByName = new Map<string, Array<ts.MethodDeclaration | ts.ConstructorDeclaration>>();
   for (const m of decl.members) {
+    const indexSig = collectIndexSignature(sf, m);
+    if (indexSig) {
+      members.push(indexSig);
+      continue;
+    }
     if (hasNamePrivateHash(m.name as ts.PropertyName | undefined)) continue;
     if (!isPublicMember(m)) continue;
     if ((ts.isGetAccessorDeclaration(m) || ts.isSetAccessorDeclaration(m)) && m.name) {
@@ -607,6 +664,11 @@ function interfaceMembers(sf: ts.SourceFile, decl: ts.InterfaceDeclaration): Mem
   const members: MemberSurface[] = [];
   const methodsByName = new Map<string, ts.MethodSignature[]>();
   for (const m of decl.members) {
+    const indexSig = collectIndexSignature(sf, m);
+    if (indexSig) {
+      members.push(indexSig);
+      continue;
+    }
     if (!m.name) continue;
     if (ts.isPropertySignature(m)) {
       members.push({
@@ -680,6 +742,11 @@ function typeLiteralMembers(sf: ts.SourceFile, node: ts.TypeLiteralNode): Member
   // reached `diffMembers`.
   const methodsByName = new Map<string, ts.MethodSignature[]>();
   for (const m of node.members) {
+    const indexSig = collectIndexSignature(sf, m);
+    if (indexSig) {
+      members.push(indexSig);
+      continue;
+    }
     if (!m.name) continue;
     if (ts.isPropertySignature(m)) {
       members.push({
@@ -1180,8 +1247,11 @@ function diffMembers(symbolName: string, oldMembers: MemberSurface[], newMembers
       changes.push({
         kind: "member-removed",
         severity: "breaking",
-        symbol: `${symbolName}.${name}`,
-        detail: `${oldMember.kind} "${name}" was removed from ${symbolName}.`,
+        symbol: name === INDEX_SIGNATURE_MEMBER_NAME ? `${symbolName} ${name}` : `${symbolName}.${name}`,
+        detail:
+          name === INDEX_SIGNATURE_MEMBER_NAME
+            ? `The index signature on ${symbolName} was removed — existing code that reads/writes an arbitrary key on it will now fail to type-check.`
+            : `${oldMember.kind} "${name}" was removed from ${symbolName}.`,
       });
       continue;
     }
@@ -1197,6 +1267,22 @@ function diffMembers(symbolName: string, oldMembers: MemberSurface[], newMembers
         severity: "breaking",
         symbol: `${symbolName}.${name}`,
         detail: `Enum member "${name}" on ${symbolName} changed value from ${oldMember.typeText} to ${newMember.typeText} — any code or stored data comparing against the old value will no longer match.`,
+      });
+    }
+
+    // An index signature's own value type changing is flagged unconditionally
+    // (either direction), the same approach as `enum-value-changed` above:
+    // narrowing it (`string | number` -> `string`) rejects an existing
+    // caller that assigns the wider value, and widening it (`string` ->
+    // `string | number`) just as surely rejects an existing caller that
+    // reads a value and assigns it to the old, narrower type -- confirmed
+    // directly against the real compiler in both directions, not assumed.
+    if (name === INDEX_SIGNATURE_MEMBER_NAME && oldMember.typeText !== newMember.typeText) {
+      changes.push({
+        kind: "index-signature-changed",
+        severity: "breaking",
+        symbol: `${symbolName} ${name}`,
+        detail: `The index signature on ${symbolName} changed value type from "${oldMember.typeText}" to "${newMember.typeText}" — existing code reading or writing through it under the old type may fail to type-check.`,
       });
     }
 
@@ -1305,8 +1391,11 @@ function diffMembers(symbolName: string, oldMembers: MemberSurface[], newMembers
       changes.push({
         kind: "member-added",
         severity: "safe",
-        symbol: `${symbolName}.${name}`,
-        detail: `${newMember.kind} "${name}" was added to ${symbolName}.`,
+        symbol: name === INDEX_SIGNATURE_MEMBER_NAME ? `${symbolName} ${name}` : `${symbolName}.${name}`,
+        detail:
+          name === INDEX_SIGNATURE_MEMBER_NAME
+            ? `An index signature was added to ${symbolName} — purely additive, it only grants callers more freedom and requires nothing new of existing object literals.`
+            : `${newMember.kind} "${name}" was added to ${symbolName}.`,
       });
     }
   }

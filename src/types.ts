@@ -44,7 +44,8 @@ export type ApiChangeKind =
   | "overload-removed"
   | "type-widened-nullable"
   | "static-modifier-changed"
-  | "readonly-added";
+  | "readonly-added"
+  | "index-signature-changed";
 
 export type ApiChangeSeverity = "breaking" | "safe";
 
