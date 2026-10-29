@@ -51,6 +51,41 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   verification banner at the top of each release. Exits with status `2`
   when it finds an undeclared breaking change, so it can gate a CI release
   job.
+- `surfacenotes watch` — a local dev-loop mode: diffs a baseline ref against
+  your live working tree (uncommitted edits included) and re-checks every
+  time a source file changes, so a breaking API edit is flagged the moment
+  it's saved, not the next time someone remembers to run `generate` against
+  a tag. See "Local dev loop" below.
+
+## Local dev loop: `surfacenotes watch`
+
+`generate` is after-the-fact — it diffs two refs that already exist. `watch`
+is for while you're still writing the change:
+
+```bash
+surfacenotes watch \
+  --repo /path/to/your/repo \
+  --entry packages/sdk/index.ts \
+  --from v1.7.2
+```
+
+It diffs `v1.7.2` against whatever is actually on disk right now (not a
+commit, not a stash — the real files, saved or not), prints a report, then
+keeps watching. Every time you save, it re-diffs and reprints:
+
+```
+[surfacenotes watch] 14:02:11 — v1.7.2 -> working tree (packages/sdk/index.ts)
+  ⚠  1 BREAKING change(s):
+    - [required-field-added] SendOptions.idempotencyKey: property "idempotencyKey" was
+      added to SendOptions as required (not optional) — existing object literals typed
+      as SendOptions that don't set it will now fail type-checking.
+```
+
+No files are written and no git state changes — it only reads (`git show`
+for the baseline, the real filesystem for your edits). Stop with `Ctrl+C`.
+Uses native recursive `fs.watch` where the platform supports it, and falls
+back to lightweight polling (a directory signature of file paths + mtimes)
+everywhere else, so it behaves the same on Linux as it does on macOS.
 
 ## A real catch, not a canned demo
 
@@ -136,6 +171,9 @@ as a release-pipeline step right before `npm publish`; a non-zero exit
 means an undeclared breaking change was found in the diff and the release
 is worth a second look before it ships. (That's a feature to run inside
 *your* CI — this repository itself has no CI/CD workflows by design.)
+
+For local iteration before you ever get to a tag, run `surfacenotes watch`
+instead — see "Local dev loop" above.
 
 ## Using it programmatically
 

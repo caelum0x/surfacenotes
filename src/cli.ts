@@ -7,6 +7,7 @@ import { diffApiSurfaces } from "./apidiff.js";
 import { verify } from "./verify.js";
 import { renderChangelog, renderReleaseNotes } from "./changelog.js";
 import { generateNarrative, resolveAiConfig } from "./ai.js";
+import { runWatch } from "./watch.js";
 
 interface Args {
   repo: string;
@@ -20,7 +21,15 @@ interface Args {
   ai: boolean;
 }
 
-function parseArgs(argv: string[]): Args {
+interface WatchArgs {
+  repo: string;
+  entry: string;
+  from: string;
+  debounceMs: number;
+}
+
+/** Shared `--flag value` / `--flag` (boolean-ish) parser used by every subcommand. */
+function parseFlags(argv: string[]): Record<string, string> {
   const args: Record<string, string> = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -35,6 +44,11 @@ function parseArgs(argv: string[]): Args {
       }
     }
   }
+  return args;
+}
+
+function parseArgs(argv: string[]): Args {
+  const args = parseFlags(argv);
 
   if (!args.repo || !args.entry || !args.from) {
     printUsage();
@@ -54,13 +68,32 @@ function parseArgs(argv: string[]): Args {
   };
 }
 
+function parseWatchArgs(argv: string[]): WatchArgs {
+  const args = parseFlags(argv);
+
+  if (!args.repo || !args.entry || !args.from) {
+    printUsage();
+    process.exit(1);
+  }
+
+  return {
+    repo: path.resolve(args.repo),
+    entry: args.entry,
+    from: args.from,
+    debounceMs: args.debounce ? Number(args.debounce) : 300,
+  };
+}
+
 function printUsage() {
   console.error(
     [
-      "surfacenotes generate — verified changelog generator for TypeScript SDKs",
+      "surfacenotes — verified changelog generator for TypeScript SDKs",
       "",
       "Usage:",
       "  surfacenotes generate --repo <path> --entry <relative-path-to-public-entry.ts> --from <ref> [--to <ref>] [options]",
+      "  surfacenotes watch --repo <path> --entry <relative-path-to-public-entry.ts> --from <ref> [--debounce <ms>]",
+      "",
+      "generate — diff two git refs/tags, write CHANGELOG.md + RELEASE_NOTES.md",
       "",
       "Required:",
       "  --repo <path>     Path to the git repository (read-only; never modified)",
@@ -80,17 +113,39 @@ function printUsage() {
       "                    for a local model, or just OPENAI_API_KEY for plain OpenAI. Missing",
       "                    config is not an error: --ai silently falls back to the structured-only",
       "                    output.",
+      "",
+      "watch — local dev loop: diff a baseline ref against the live working tree",
+      "        (uncommitted edits included), re-checking every time a source file",
+      "        changes, so a breaking API edit is caught the moment it's saved —",
+      "        before it's ever committed or tagged. No files are written; the",
+      "        report prints straight to the terminal. Stop with Ctrl+C.",
+      "",
+      "Required:",
+      "  --repo <path>     Path to the git repository (read-only; never modified)",
+      "  --entry <path>    Repo-relative path to the package's public entry file",
+      "  --from <ref>      Baseline git ref/tag to diff the working tree against",
+      "",
+      "Options:",
+      "  --debounce <ms>   Wait this long after the last change before re-diffing (default: 300)",
     ].join("\n"),
   );
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
   const command = process.argv[2];
+
+  if (command === "watch") {
+    const watchArgs = parseWatchArgs(process.argv.slice(3));
+    await runWatch(watchArgs);
+    return;
+  }
+
   if (command !== "generate") {
     printUsage();
     process.exit(command === undefined ? 1 : 0);
   }
+
+  const args = parseArgs(process.argv.slice(2));
 
   const fromSha = resolveRef(args.repo, args.from);
   const toSha = resolveRef(args.repo, args.to);
