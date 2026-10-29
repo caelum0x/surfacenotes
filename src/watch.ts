@@ -108,12 +108,47 @@ function diffAgainstWorkingTree(opts: WatchOptions, fromSha: string): ApiDiffRes
  * where the platform/Node version supports it (fast, event-driven); falls
  * back to lightweight signature polling everywhere else so the feature never
  * just silently does nothing on an unsupported platform.
+ *
+ * Missed-update race (found live 2026-10-29, reproduced before this fix):
+ * saving a file schedules a debounced `onChange` up to `debounceMs` in the
+ * future, not immediately. If the watcher is stopped (SIGINT) while that
+ * timer is still pending — a totally realistic sequence ("save, then
+ * Ctrl+C to go commit") well within the default 300ms window — the old
+ * code's `stop()` just did `clearTimeout(timer)` and returned, silently
+ * discarding the pending diff. The process then exited having never
+ * re-checked the final on-disk edit, with the last printed report still
+ * showing the *previous* (pre-edit) verdict — so a developer who saves a
+ * breaking change and immediately quits watch mode sees no warning at all.
+ * The returned `stop()` now flushes: if a change was pending when asked to
+ * stop, it runs `onChange` once, synchronously, before tearing down the
+ * watcher/interval, so the real final on-disk state always gets diffed
+ * before the process can exit.
  */
 function watchForChanges(root: string, debounceMs: number, onChange: () => void): () => void {
   let timer: NodeJS.Timeout | null = null;
+  let pendingChange = false;
+
+  const fire = () => {
+    timer = null;
+    pendingChange = false;
+    onChange();
+  };
+
   const scheduled = () => {
+    pendingChange = true;
     if (timer) clearTimeout(timer);
-    timer = setTimeout(onChange, debounceMs);
+    timer = setTimeout(fire, debounceMs);
+  };
+
+  const flushPending = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (pendingChange) {
+      pendingChange = false;
+      onChange();
+    }
   };
 
   try {
@@ -123,7 +158,7 @@ function watchForChanges(root: string, debounceMs: number, onChange: () => void)
       scheduled();
     });
     return () => {
-      if (timer) clearTimeout(timer);
+      flushPending();
       watcher.close();
     };
   } catch {
@@ -138,7 +173,7 @@ function watchForChanges(root: string, debounceMs: number, onChange: () => void)
       }
     }, Math.max(300, Math.min(debounceMs, 1000)));
     return () => {
-      if (timer) clearTimeout(timer);
+      flushPending();
       clearInterval(interval);
     };
   }
