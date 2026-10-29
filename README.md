@@ -77,7 +77,12 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   `name: string` -> `name: string | undefined`, or `getName(): string` ->
   `getName(): string | undefined`) is breaking — existing callers that use
   the value directly with no null/undefined check will fail to type-check
-  under strict null checks.
+  under strict null checks. A class member flipping between `static` and
+  instance (e.g. `static send(a: string): void {}` -> `send(a: string):
+  void {}`, same name, same params) is breaking in either direction —
+  confirmed against the real compiler: existing callers written as
+  `Client.send(x)` or `new Client().send(x)` fail to type-check against the
+  other shape, even though nothing else about the member changed.
 - Writes `CHANGELOG.md` (developer-facing, with commit/PR links) and
   `RELEASE_NOTES.md` (same data, plain language, no hashes) with a
   verification banner at the top of each release. Exits with status `2`

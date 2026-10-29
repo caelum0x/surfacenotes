@@ -44,6 +44,14 @@ interface MemberSurface {
    * (not just "unknown") whenever the type couldn't be resolved at all
    * (no annotation, inferred), which is the conservative/safe default. */
   nullable: boolean;
+  /** True for a class member declared with the `static` modifier. Only
+   * meaningful on `classMembers()` output -- interfaces/type-literals/enums
+   * have no such concept and always carry `false` here. See
+   * `staticModifierChanged` for the real break this exists to catch:
+   * flipping a member between static and instance (same name, same kind,
+   * possibly identical params) is invisible to every other check in this
+   * file, since none of them look at how the member is actually called. */
+  isStatic: boolean;
 }
 
 interface ExportSurface {
@@ -187,6 +195,24 @@ function isPublicMember(member: ts.ClassElement): boolean {
 
 function hasNamePrivateHash(name: ts.PropertyName | undefined): boolean {
   return !!name && ts.isPrivateIdentifier(name);
+}
+
+/**
+ * True when `member` carries the `static` modifier. Flipping a class member
+ * between static and instance while keeping its name, kind, and even its
+ * parameter list identical (e.g. `static send(a: string): void {}` ->
+ * `send(a: string): void {}`) is a real breaking change -- callers of the
+ * old shape wrote `Client.send(x)`, callers of the new shape must write
+ * `new Client().send(x)` instead -- confirmed directly against the real
+ * compiler (`tsc --strict`): the old call site produces a real `error
+ * TS2339: Property 'send' does not exist on type 'typeof Client'` against
+ * the new shape. Nothing else in this file looks at how a member is
+ * actually invoked, so this was completely invisible before: same name,
+ * same `kind`, same `params` -> zero structural changes detected.
+ */
+function hasStaticModifier(member: ts.ClassElement): boolean {
+  const mods = ts.canHaveModifiers(member) ? ts.getModifiers(member) : undefined;
+  return !!mods?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword);
 }
 
 /**
@@ -438,7 +464,7 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
    * `MemberSurface` here (keyed below) the same way TypeScript itself
    * treats them as a single property from the outside.
    */
-  const accessors = new Map<string, { typeText: string; nullable: boolean }>();
+  const accessors = new Map<string, { typeText: string; nullable: boolean; isStatic: boolean }>();
   /**
    * Methods and constructors are bucketed by name first, instead of pushed
    * straight into `members` one `ClassElement` at a time, so that a real
@@ -465,7 +491,7 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
       // instance.prop`) actually observes. A setter-only accessor (write
       // without read) falls back to its parameter's type.
       if (!accessors.has(name) || ts.isGetAccessorDeclaration(m)) {
-        accessors.set(name, { typeText, nullable: isNullableTypeNode(typeNode) });
+        accessors.set(name, { typeText, nullable: isNullableTypeNode(typeNode), isStatic: hasStaticModifier(m) });
       }
       continue;
     }
@@ -483,6 +509,7 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
         params: null,
         typeText: m.type ? textOf(sf, m.type) : "inferred",
         nullable: isNullableTypeNode(m.type),
+        isStatic: hasStaticModifier(m),
       });
     } else if (ts.isConstructorDeclaration(m)) {
       const list = callableByName.get("constructor") ?? [];
@@ -502,6 +529,13 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
       overloadParams: signatureNodes.map((d) => collectParams(sf, d.parameters)),
       typeText: ts.isMethodDeclaration(primary) ? textOf(sf, primary.type) : "void",
       nullable: ts.isMethodDeclaration(primary) ? isNullableTypeNode(primary.type) : false,
+      // `primary` (the first declaration pushed for this name) decides
+      // static-ness, same "primary wins" convention already used above for
+      // params/type when a name has multiple overload declarations -- a
+      // name mixing a static and an instance overload under the same name
+      // is itself vanishingly rare and out of this differ's documented
+      // heuristic scope.
+      isStatic: hasStaticModifier(primary),
     });
   }
   for (const [name, info] of accessors) {
@@ -513,6 +547,7 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
       params: null,
       typeText: info.typeText,
       nullable: info.nullable,
+      isStatic: info.isStatic,
     });
   }
   return members;
@@ -531,6 +566,7 @@ function interfaceMembers(sf: ts.SourceFile, decl: ts.InterfaceDeclaration): Mem
         params: null,
         typeText: textOf(sf, m.type),
         nullable: isNullableTypeNode(m.type),
+        isStatic: false,
       });
     } else if (ts.isMethodSignature(m)) {
       members.push({
@@ -541,6 +577,7 @@ function interfaceMembers(sf: ts.SourceFile, decl: ts.InterfaceDeclaration): Mem
         params: collectParams(sf, m.parameters),
         typeText: textOf(sf, m.type),
         nullable: isNullableTypeNode(m.type),
+        isStatic: false,
       });
     }
   }
@@ -560,6 +597,7 @@ function typeLiteralMembers(sf: ts.SourceFile, node: ts.TypeLiteralNode): Member
         params: null,
         typeText: textOf(sf, m.type),
         nullable: isNullableTypeNode(m.type),
+        isStatic: false,
       });
     }
   }
@@ -613,6 +651,7 @@ function enumMembers(sf: ts.SourceFile, decl: ts.EnumDeclaration): MemberSurface
       params: null,
       typeText: valueText,
       nullable: false,
+      isStatic: false,
     };
   });
 }
@@ -1034,6 +1073,17 @@ function diffMembers(symbolName: string, oldMembers: MemberSurface[], newMembers
         severity: "breaking",
         symbol: `${symbolName}.${name}`,
         detail: `"${name}" on ${symbolName} changed from optional to required — existing callers that omit it will now fail type-checking.`,
+      });
+    }
+
+    if (parentKind === "class" && oldMember.isStatic !== newMember.isStatic) {
+      changes.push({
+        kind: "static-modifier-changed",
+        severity: "breaking",
+        symbol: `${symbolName}.${name}`,
+        detail: oldMember.isStatic
+          ? `${symbolName}.${name} changed from a static member to an instance member — existing callers using "${symbolName}.${name}(...)" directly on the class will now fail to type-check; it must be called on an instance instead.`
+          : `${symbolName}.${name} changed from an instance member to a static member — existing callers using "instance.${name}(...)" will now fail to type-check; it must be called on the class itself instead.`,
       });
     }
 

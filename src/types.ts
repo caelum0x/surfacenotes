@@ -42,7 +42,8 @@ export type ApiChangeKind =
   | "enum-value-changed"
   | "type-param-narrowed"
   | "overload-removed"
-  | "type-widened-nullable";
+  | "type-widened-nullable"
+  | "static-modifier-changed";
 
 export type ApiChangeSeverity = "breaking" | "safe";
 
