@@ -94,7 +94,11 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   is breaking.
 - Writes `CHANGELOG.md` (developer-facing, with commit/PR links) and
   `RELEASE_NOTES.md` (same data, plain language, no hashes) with a
-  verification banner at the top of each release. Exits with status `2`
+  verification banner at the top of each release, prepending each new
+  release's section above whatever releases are already recorded there
+  instead of overwriting the file — running `generate` again for the same
+  version (e.g. on a different day) replaces that version's section in
+  place rather than duplicating it. Exits with status `2`
   when it finds an undeclared breaking change, so it can gate a CI release
   job.
 - `surfacenotes watch` — a local dev-loop mode: diffs a baseline ref against
