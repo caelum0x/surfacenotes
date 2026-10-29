@@ -124,7 +124,12 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   tool already extracted — the anti-hallucination constraint this project's
   own research flagged as mandatory. Off by default; a missing/misconfigured
   endpoint degrades silently to the structured-only output rather than
-  erroring. See `--ai` in `surfacenotes generate --help` output above.
+  erroring. See `--ai` in `surfacenotes generate --help` output above. The
+  request itself has a 30s timeout and a 2MB response cap, so a hung or
+  misbehaving endpoint (a local model still loading, a stalled proxy) can
+  never wedge `generate` indefinitely or buffer an unbounded body into
+  memory — it just degrades to the structured-only output, same as a
+  missing config.
 
 ## Local dev loop: `surfacenotes watch`
 
