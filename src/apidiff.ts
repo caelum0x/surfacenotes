@@ -38,6 +38,12 @@ interface MemberSurface {
    * (identical to `params`) for an ordinary, non-overloaded method. */
   overloadParams?: ParamSurface[][] | null;
   typeText: string;
+  /** True when this property's declared type, or this method's declared
+   * return type, is a top-level union that includes `undefined`/`null` --
+   * see `isNullableTypeNode` for the real break this exists to catch. False
+   * (not just "unknown") whenever the type couldn't be resolved at all
+   * (no annotation, inferred), which is the conservative/safe default. */
+  nullable: boolean;
 }
 
 interface ExportSurface {
@@ -64,6 +70,12 @@ interface ExportSurface {
    * parameters for (default-export expressions, enums, consts). */
   typeParams: TypeParamSurface[];
   typeText: string;
+  /** Same meaning as `MemberSurface.nullable`, for this export's own type
+   * where one applies directly to the export itself (a top-level function's
+   * return type, a `const`'s declared type, a non-object-shaped type
+   * alias's target) -- see `isNullableTypeNode`. False for shapes with no
+   * single "the type" to check (class, interface, enum, unknown). */
+  nullable: boolean;
 }
 
 type SurfaceMap = Map<string, ExportSurface>;
@@ -121,6 +133,48 @@ function loadSourceFile(absPath: string): ts.SourceFile | null {
 function textOf(sf: ts.SourceFile, node: ts.Node | undefined): string {
   if (!node) return "unknown";
   return node.getText(sf).replace(/\s+/g, " ").trim();
+}
+
+/** True for the real `undefined` keyword type or the real `null` literal type
+ * -- see `isNullableTypeNode` for why this is checked at the AST level
+ * instead of via a text match on `typeText` (a type like `Record<string,
+ * string | undefined>` or `Array<string | null>` contains the substrings
+ * "undefined"/"null" without being nullable *at its own top level*, so a
+ * naive string search over `typeText` would false-positive on it). */
+function isNullOrUndefinedTypeNode(node: ts.TypeNode): boolean {
+  if (node.kind === ts.SyntaxKind.UndefinedKeyword) return true;
+  if (ts.isLiteralTypeNode(node) && node.literal.kind === ts.SyntaxKind.NullKeyword) return true;
+  return false;
+}
+
+/**
+ * Real breaking change this differ previously had zero visibility into: a
+ * property's declared type, or a function/method's declared return type,
+ * widened to include `undefined`/`null` at its own top level (e.g. `name:
+ * string` -> `name: string | undefined`, or `getName(): string` ->
+ * `getName(): string | undefined`) -- a real, common real-world SDK edit
+ * (marking a previously-guaranteed response field nullable, or a lookup
+ * method starting to return `undefined` on a miss) that's genuinely breaking
+ * for every existing caller that used the old value directly with no
+ * null/undefined check, confirmed directly against the real compiler
+ * (`tsc --strict`): `getName().toUpperCase()`, valid against the old
+ * signature, produces a real `error TS18048: 'getName(...)' is possibly
+ * 'undefined'` against the new one. Every `MemberSurface`/`ExportSurface`
+ * already captured a `typeText` string for its own type/return type, but
+ * nothing in this file ever compared it across snapshots at all (the one
+ * exception, enum member values, compares a different, non-type field) --
+ * this was a real, silent, unchecked gap across the entire file, not a
+ * narrow one-line miss. Only fires on a top-level union directly on the
+ * type/return-type node itself (handles the plain `T | undefined` case and
+ * the bare `undefined`/`null` keyword alone); deliberately does not try to
+ * resolve `Undefinable<T>`-style type aliases, consistent with this
+ * differ's documented heuristic scope.
+ */
+function isNullableTypeNode(node: ts.TypeNode | undefined): boolean {
+  if (!node) return false;
+  if (isNullOrUndefinedTypeNode(node)) return true;
+  if (ts.isUnionTypeNode(node)) return node.types.some(isNullOrUndefinedTypeNode);
+  return false;
 }
 
 function isPublicMember(member: ts.ClassElement): boolean {
@@ -384,7 +438,7 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
    * `MemberSurface` here (keyed below) the same way TypeScript itself
    * treats them as a single property from the outside.
    */
-  const accessors = new Map<string, { typeText: string }>();
+  const accessors = new Map<string, { typeText: string; nullable: boolean }>();
   /**
    * Methods and constructors are bucketed by name first, instead of pushed
    * straight into `members` one `ClassElement` at a time, so that a real
@@ -404,19 +458,14 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
     if (!isPublicMember(m)) continue;
     if ((ts.isGetAccessorDeclaration(m) || ts.isSetAccessorDeclaration(m)) && m.name) {
       const name = textOf(sf, m.name);
-      const typeText = ts.isGetAccessorDeclaration(m)
-        ? m.type
-          ? textOf(sf, m.type)
-          : "inferred"
-        : m.parameters[0]?.type
-          ? textOf(sf, m.parameters[0].type)
-          : "inferred";
+      const typeNode = ts.isGetAccessorDeclaration(m) ? m.type : m.parameters[0]?.type;
+      const typeText = typeNode ? textOf(sf, typeNode) : "inferred";
       // Prefer the getter's type when both a getter and setter share a
       // name -- that's the type an external reader (`const x =
       // instance.prop`) actually observes. A setter-only accessor (write
       // without read) falls back to its parameter's type.
       if (!accessors.has(name) || ts.isGetAccessorDeclaration(m)) {
-        accessors.set(name, { typeText });
+        accessors.set(name, { typeText, nullable: isNullableTypeNode(typeNode) });
       }
       continue;
     }
@@ -433,6 +482,7 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
         paramsText: null,
         params: null,
         typeText: m.type ? textOf(sf, m.type) : "inferred",
+        nullable: isNullableTypeNode(m.type),
       });
     } else if (ts.isConstructorDeclaration(m)) {
       const list = callableByName.get("constructor") ?? [];
@@ -451,10 +501,19 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
       params: collectParams(sf, primary.parameters),
       overloadParams: signatureNodes.map((d) => collectParams(sf, d.parameters)),
       typeText: ts.isMethodDeclaration(primary) ? textOf(sf, primary.type) : "void",
+      nullable: ts.isMethodDeclaration(primary) ? isNullableTypeNode(primary.type) : false,
     });
   }
   for (const [name, info] of accessors) {
-    members.push({ name, kind: "property", optional: false, paramsText: null, params: null, typeText: info.typeText });
+    members.push({
+      name,
+      kind: "property",
+      optional: false,
+      paramsText: null,
+      params: null,
+      typeText: info.typeText,
+      nullable: info.nullable,
+    });
   }
   return members;
 }
@@ -471,6 +530,7 @@ function interfaceMembers(sf: ts.SourceFile, decl: ts.InterfaceDeclaration): Mem
         paramsText: null,
         params: null,
         typeText: textOf(sf, m.type),
+        nullable: isNullableTypeNode(m.type),
       });
     } else if (ts.isMethodSignature(m)) {
       members.push({
@@ -480,6 +540,7 @@ function interfaceMembers(sf: ts.SourceFile, decl: ts.InterfaceDeclaration): Mem
         paramsText: paramsSignature(sf, m.parameters),
         params: collectParams(sf, m.parameters),
         typeText: textOf(sf, m.type),
+        nullable: isNullableTypeNode(m.type),
       });
     }
   }
@@ -498,6 +559,7 @@ function typeLiteralMembers(sf: ts.SourceFile, node: ts.TypeLiteralNode): Member
         paramsText: null,
         params: null,
         typeText: textOf(sf, m.type),
+        nullable: isNullableTypeNode(m.type),
       });
     }
   }
@@ -550,6 +612,7 @@ function enumMembers(sf: ts.SourceFile, decl: ts.EnumDeclaration): MemberSurface
       paramsText: null,
       params: null,
       typeText: valueText,
+      nullable: false,
     };
   });
 }
@@ -603,6 +666,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       params: null,
       typeParams: collectTypeParams(sf, node.typeParameters),
       typeText: "class",
+      nullable: false,
     };
   }
   if (ts.isInterfaceDeclaration(node)) {
@@ -615,6 +679,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       params: null,
       typeParams: collectTypeParams(sf, node.typeParameters),
       typeText: "interface",
+      nullable: false,
     };
   }
   if (ts.isFunctionDeclaration(node)) {
@@ -643,6 +708,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       overloadParams: signatureNodes.map((s) => collectParams(sf, s.parameters)),
       typeParams: collectTypeParams(sf, node.typeParameters),
       typeText: textOf(sf, node.type),
+      nullable: isNullableTypeNode(node.type),
     };
   }
   if (ts.isTypeAliasDeclaration(node)) {
@@ -657,6 +723,11 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       params: null,
       typeParams: collectTypeParams(sf, node.typeParameters),
       typeText: textOf(sf, node.type),
+      // Object-shaped aliases (`type X = {...}`) already get field-level
+      // nullable-widening coverage via `objectShapedMembers`'s member diff
+      // above -- only a non-object-shaped alias (`type Timeout = number`)
+      // has "the type itself" as a meaningful, separate nullable check.
+      nullable: !objectShaped && isNullableTypeNode(node.type),
     };
   }
   if (ts.isEnumDeclaration(node)) {
@@ -669,6 +740,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       params: null,
       typeParams: [],
       typeText: "enum",
+      nullable: false,
     };
   }
   if (ts.isVariableDeclaration(node)) {
@@ -683,6 +755,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
         params: collectParams(sf, init.parameters),
         typeParams: collectTypeParams(sf, init.typeParameters),
         typeText: textOf(sf, init.type),
+        nullable: isNullableTypeNode(init.type),
       };
     }
     return {
@@ -694,6 +767,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       params: null,
       typeParams: [],
       typeText: node.type ? textOf(sf, node.type) : "inferred",
+      nullable: isNullableTypeNode(node.type),
     };
   }
   return {
@@ -704,6 +778,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
     paramsText: null,
     params: null,
     typeParams: [],
+    nullable: false,
     typeText: "unknown",
   };
 }
@@ -867,6 +942,7 @@ function collectExports(
           params: collectParams(sf, expr.parameters),
           typeParams: collectTypeParams(sf, expr.typeParameters),
           typeText: textOf(sf, expr.type),
+          nullable: isNullableTypeNode(expr.type),
         });
       } else if (ts.isClassExpression(expr)) {
         result.set("default", {
@@ -878,6 +954,7 @@ function collectExports(
           params: null,
           typeParams: collectTypeParams(sf, expr.typeParameters),
           typeText: "class",
+          nullable: false,
         });
       } else {
         unresolved.push(`default export expression (via ${entryFile}, not a resolvable shape)`);
@@ -957,6 +1034,18 @@ function diffMembers(symbolName: string, oldMembers: MemberSurface[], newMembers
         severity: "breaking",
         symbol: `${symbolName}.${name}`,
         detail: `"${name}" on ${symbolName} changed from optional to required — existing callers that omit it will now fail type-checking.`,
+      });
+    }
+
+    if (!oldMember.nullable && newMember.nullable) {
+      changes.push({
+        kind: "type-widened-nullable",
+        severity: "breaking",
+        symbol: `${symbolName}.${name}`,
+        detail:
+          newMember.kind === "method"
+            ? `${symbolName}.${name}()'s return type now includes undefined/null where it didn't before — existing callers that use the result directly without a null/undefined check will fail to type-check under strict null checks.`
+            : `"${name}" on ${symbolName} now includes undefined/null in its type where it didn't before — existing callers that use the value directly without a null/undefined check will fail to type-check under strict null checks.`,
       });
     }
 
@@ -1110,6 +1199,18 @@ function diffSurfaces(oldMap: SurfaceMap, newMap: SurfaceMap): ApiChange[] {
         severity: "breaking",
         symbol: name,
         detail: `${name}<...> now requires additional type parameter(s) with no default: ${narrowedTypeParams.map((p) => p.name).join(", ")} — existing usages of "${name}" that don't supply them will fail to type-check.`,
+      });
+    }
+
+    if (!oldSurface.nullable && newSurface.nullable) {
+      changes.push({
+        kind: "type-widened-nullable",
+        severity: "breaking",
+        symbol: name,
+        detail:
+          newSurface.kind === "function"
+            ? `${name}()'s return type now includes undefined/null where it didn't before — existing callers that use the result directly without a null/undefined check will fail to type-check under strict null checks.`
+            : `"${name}"'s type now includes undefined/null where it didn't before — existing callers that use the value directly without a null/undefined check will fail to type-check under strict null checks.`,
       });
     }
 

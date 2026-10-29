@@ -72,6 +72,12 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   call signatures, not collapsed to just one of them — losing a previously
   declared call shape anywhere in that list (by structural match, not just
   position, so reordering or adding an overload is still safe) is breaking.
+  A property's declared type, or a function/method's declared return type,
+  widening to include `undefined`/`null` where it didn't before (e.g.
+  `name: string` -> `name: string | undefined`, or `getName(): string` ->
+  `getName(): string | undefined`) is breaking — existing callers that use
+  the value directly with no null/undefined check will fail to type-check
+  under strict null checks.
 - Writes `CHANGELOG.md` (developer-facing, with commit/PR links) and
   `RELEASE_NOTES.md` (same data, plain language, no hashes) with a
   verification banner at the top of each release. Exits with status `2`
