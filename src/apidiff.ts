@@ -31,6 +31,12 @@ interface MemberSurface {
   optional: boolean;
   paramsText: string | null;
   params: ParamSurface[] | null;
+  /** Every real call signature for this method, when it's declared with
+   * TypeScript overloads (`foo(a: string): void; foo(a: number): void;`) --
+   * see `overloadRemoved` for the real break this exists to catch. `null`/
+   * absent for non-method members (properties); a single-entry array
+   * (identical to `params`) for an ordinary, non-overloaded method. */
+  overloadParams?: ParamSurface[][] | null;
   typeText: string;
 }
 
@@ -47,6 +53,11 @@ interface ExportSurface {
   members: MemberSurface[];
   paramsText: string | null;
   params: ParamSurface[] | null;
+  /** Every real call signature for this export, when it's a function
+   * declared with TypeScript overloads -- same shape and purpose as
+   * `MemberSurface.overloadParams`, for top-level exported functions rather
+   * than class methods. */
+  overloadParams?: ParamSurface[][] | null;
   /** Generic type parameters declared directly on this export (e.g. the
    * `<T, E = unknown>` in `type Result<T, E = unknown> = {...}`) -- empty
    * for non-generic exports and for shapes this differ doesn't resolve type
@@ -204,6 +215,84 @@ function paramNarrowedToRequired(
   return narrowed;
 }
 
+/**
+ * Given every sibling declaration/class-element that shares one function or
+ * method name (a real TypeScript overload set, e.g. `createUser(email:
+ * string): string; createUser(opts: Opts): string; createUser(arg: ...): ...
+ * { ... }`), return just the nodes an external caller can actually invoke:
+ * the bodyless overload *signatures* when any exist, or the single node
+ * itself when there's exactly one (the ordinary, non-overloaded case). The
+ * body-carrying implementation signature (the last one, with `{ ... }`) is
+ * deliberately excluded once real overload signatures exist -- TypeScript
+ * itself doesn't let external callers resolve against the implementation
+ * signature, only against the declared overloads.
+ */
+function overloadSignatureNodes<T extends { body?: ts.Block | undefined }>(nodes: T[]): T[] {
+  const signatures = nodes.filter((n) => !n.body);
+  return signatures.length > 0 ? signatures : nodes;
+}
+
+/** Structural equality of one call signature's parameter list -- ignores
+ * parameter *names* (TypeScript resolves overload call-site matching by
+ * position and type, not by the parameter's own name) but requires the same
+ * length and, position-wise, the same optionality/rest-ness/type text. Used
+ * only to decide whether a given old overload shape still has an exact
+ * match on the new side -- not a general type-compatibility check. */
+function signaturesEqual(a: ParamSurface[], b: ParamSurface[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every(
+    (p, i) => p.optional === b[i].optional && p.rest === b[i].rest && p.typeText === b[i].typeText,
+  );
+}
+
+/**
+ * Real breaking change this differ previously had zero visibility into at
+ * all: before this, both `collectExports`' `findLocalDeclaration` (for
+ * top-level functions) and `classMembers` (for class methods) only ever
+ * captured ONE call signature per name -- `findLocalDeclaration` returns the
+ * first matching declaration node it finds, and `classMembers` pushed one
+ * `MemberSurface` per overload `ClassElement`, all keyed by the same method
+ * name, which `diffMembers`' `new Map(members.map((m) => [m.name, m]))`
+ * then silently collapsed down to whichever one was pushed *last* -- so an
+ * overloaded function/method's *other* declared call shapes were invisible
+ * to the structural diff on both sides, independent of whether any of them
+ * actually changed. Confirmed as a real, citable break directly against the
+ * compiler: a synthetic repro (`createUser(email: string)` / `createUser
+ * (opts: Opts)` narrowed down to just the `opts` overload, committed as a
+ * mislabeled `fix:` with no `!`/`BREAKING CHANGE:` footer) printed "API diff
+ * found 0 structural change(s)" and exited 0 before this fix; `tsc --strict`
+ * on a real caller using the removed `createUser("a@b.com")` shape against
+ * the new signature produces a real `error TS2345: Argument of type
+ * 'string' is not assignable to parameter of type '{ email: string; name:
+ * string; }'`. Matches each old call shape against the new list by
+ * structural equality rather than by position, so reordering overloads (or
+ * adding a new one) is never mistaken for a loss -- only an old shape with
+ * no equal match anywhere on the new side counts as genuinely vanished.
+ * Never fires for an ordinary, non-overloaded function/method, since both
+ * sides then always have exactly one signature.
+ */
+function overloadRemoved(
+  oldSignatures: ParamSurface[][] | null | undefined,
+  newSignatures: ParamSurface[][] | null | undefined,
+): { removedCount: number; oldCount: number; newCount: number; example: ParamSurface[] } | null {
+  const oldList = oldSignatures ?? [];
+  const newList = newSignatures ?? [];
+  if (oldList.length <= 1 && newList.length <= 1) return null; // no real overloading on either side
+  // Match each old call shape against the new list by structural equality
+  // (not position) -- an overload set can be reordered, or a kept overload
+  // can slide to a different index, without any real break; only an old
+  // shape with *no* exact match anywhere in the new list is a real vanished
+  // call signature.
+  const removed = oldList.filter((old) => !newList.some((n) => signaturesEqual(old, n)));
+  if (removed.length === 0) return null;
+  return {
+    removedCount: removed.length,
+    oldCount: oldList.length,
+    newCount: newList.length,
+    example: removed[0],
+  };
+}
+
 function collectTypeParams(
   sf: ts.SourceFile,
   typeParams: readonly ts.TypeParameterDeclaration[] | undefined,
@@ -269,6 +358,20 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
    * treats them as a single property from the outside.
    */
   const accessors = new Map<string, { typeText: string }>();
+  /**
+   * Methods and constructors are bucketed by name first, instead of pushed
+   * straight into `members` one `ClassElement` at a time, so that a real
+   * TypeScript overload set (`send(a: string): void; send(a: Opts): void;
+   * send(a: any) { ... }` -- three separate `ClassElement`s sharing one
+   * name) is merged into a single `MemberSurface` carrying every real call
+   * signature via `overloadParams`, instead of silently collapsing to
+   * whichever declaration happened to be pushed last (see `overloadRemoved`
+   * for the real break this exists to catch -- the previous one-push-per-
+   * element behavior meant the *other* overloads were invisible to the
+   * structural diff on both sides, independent of whether any of them
+   * actually changed).
+   */
+  const callableByName = new Map<string, Array<ts.MethodDeclaration | ts.ConstructorDeclaration>>();
   for (const m of decl.members) {
     if (hasNamePrivateHash(m.name as ts.PropertyName | undefined)) continue;
     if (!isPublicMember(m)) continue;
@@ -291,14 +394,10 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
       continue;
     }
     if (ts.isMethodDeclaration(m) && m.name) {
-      members.push({
-        name: textOf(sf, m.name),
-        kind: "method",
-        optional: !!m.questionToken,
-        paramsText: paramsSignature(sf, m.parameters),
-        params: collectParams(sf, m.parameters),
-        typeText: textOf(sf, m.type),
-      });
+      const name = textOf(sf, m.name);
+      const list = callableByName.get(name) ?? [];
+      list.push(m);
+      callableByName.set(name, list);
     } else if (ts.isPropertyDeclaration(m) && m.name) {
       members.push({
         name: textOf(sf, m.name),
@@ -309,15 +408,23 @@ function classMembers(sf: ts.SourceFile, decl: ts.ClassDeclaration): MemberSurfa
         typeText: m.type ? textOf(sf, m.type) : "inferred",
       });
     } else if (ts.isConstructorDeclaration(m)) {
-      members.push({
-        name: "constructor",
-        kind: "method",
-        optional: false,
-        paramsText: paramsSignature(sf, m.parameters),
-        params: collectParams(sf, m.parameters),
-        typeText: "void",
-      });
+      const list = callableByName.get("constructor") ?? [];
+      list.push(m);
+      callableByName.set("constructor", list);
     }
+  }
+  for (const [name, decls] of callableByName) {
+    const signatureNodes = overloadSignatureNodes(decls);
+    const primary = decls[0];
+    members.push({
+      name,
+      kind: "method",
+      optional: ts.isMethodDeclaration(primary) ? !!primary.questionToken : false,
+      paramsText: paramsSignature(sf, primary.parameters),
+      params: collectParams(sf, primary.parameters),
+      overloadParams: signatureNodes.map((d) => collectParams(sf, d.parameters)),
+      typeText: ts.isMethodDeclaration(primary) ? textOf(sf, primary.type) : "void",
+    });
   }
   for (const [name, info] of accessors) {
     members.push({ name, kind: "property", optional: false, paramsText: null, params: null, typeText: info.typeText });
@@ -484,6 +591,21 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
     };
   }
   if (ts.isFunctionDeclaration(node)) {
+    // A top-level exported function can be declared with real TypeScript
+    // overloads -- several sibling `FunctionDeclaration` statements sharing
+    // one name in `sf.statements` (e.g. `export function createUser(email:
+    // string): string; export function createUser(opts: Opts): string;
+    // export function createUser(arg) { ... }`). `node` here is whichever
+    // one `findLocalDeclaration` happened to find first; `overloadParams`
+    // below independently re-collects every sibling so no overload is lost
+    // just because `node` isn't the whole set -- see `overloadRemoved`.
+    const siblingName = node.name?.text;
+    const siblings = siblingName
+      ? sf.statements.filter(
+          (s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === siblingName,
+        )
+      : [node];
+    const signatureNodes = overloadSignatureNodes(siblings);
     return {
       name,
       kind: "function",
@@ -491,6 +613,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       members: [],
       paramsText: paramsSignature(sf, node.parameters),
       params: collectParams(sf, node.parameters),
+      overloadParams: signatureNodes.map((s) => collectParams(sf, s.parameters)),
       typeParams: collectTypeParams(sf, node.typeParameters),
       typeText: textOf(sf, node.type),
     };
@@ -811,6 +934,15 @@ function diffMembers(symbolName: string, oldMembers: MemberSurface[], newMembers
     }
 
     if (oldMember.kind === "method" && newMember.kind === "method") {
+      const overloadLoss = overloadRemoved(oldMember.overloadParams, newMember.overloadParams);
+      if (overloadLoss) {
+        changes.push({
+          kind: "overload-removed",
+          severity: "breaking",
+          symbol: `${symbolName}.${name}`,
+          detail: `${symbolName}.${name}() lost ${overloadLoss.removedCount} overload signature(s) (had ${overloadLoss.oldCount}, now ${overloadLoss.newCount}) — e.g. a call shaped like (${formatParams(overloadLoss.example)}) is no longer callable.`,
+        });
+      }
       const addedRequired = newlyAddedRequiredParams(oldMember.params, newMember.params);
       if (addedRequired.length > 0) {
         changes.push({
@@ -908,6 +1040,15 @@ function diffSurfaces(oldMap: SurfaceMap, newMap: SurfaceMap): ApiChange[] {
     }
 
     if (oldSurface.kind === "function" || newSurface.params !== null) {
+      const overloadLoss = overloadRemoved(oldSurface.overloadParams, newSurface.overloadParams);
+      if (overloadLoss) {
+        changes.push({
+          kind: "overload-removed",
+          severity: "breaking",
+          symbol: name,
+          detail: `${name}() lost ${overloadLoss.removedCount} overload signature(s) (had ${overloadLoss.oldCount}, now ${overloadLoss.newCount}) — e.g. a call shaped like (${formatParams(overloadLoss.example)}) is no longer callable.`,
+        });
+      }
       const addedRequired = newlyAddedRequiredParams(oldSurface.params, newSurface.params);
       if (addedRequired.length > 0) {
         changes.push({

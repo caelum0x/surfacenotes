@@ -61,7 +61,12 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   breaking — even when the member-level diff sees nothing to flag, e.g. a
   new *optional* field riding along with the new type parameter — because it
   raises the number of explicit type arguments a usage like `Result<string>`
-  must supply, everything additive is safe.
+  must supply, everything additive is safe. A real declared TypeScript
+  overload set on an exported function or class method (`send(a: string):
+  void; send(a: Opts): void; send(a) { ... }`) is diffed as a full list of
+  call signatures, not collapsed to just one of them — losing a previously
+  declared call shape anywhere in that list (by structural match, not just
+  position, so reordering or adding an overload is still safe) is breaking.
 - Writes `CHANGELOG.md` (developer-facing, with commit/PR links) and
   `RELEASE_NOTES.md` (same data, plain language, no hashes) with a
   verification banner at the top of each release. Exits with status `2`

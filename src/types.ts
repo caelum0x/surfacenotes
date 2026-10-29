@@ -40,7 +40,8 @@ export type ApiChangeKind =
   | "param-removed"
   | "param-became-required"
   | "enum-value-changed"
-  | "type-param-narrowed";
+  | "type-param-narrowed"
+  | "overload-removed";
 
 export type ApiChangeSeverity = "breaking" | "safe";
 
