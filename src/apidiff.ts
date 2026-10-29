@@ -15,6 +15,16 @@ interface ParamSurface {
   rest: boolean;
 }
 
+/** One generic type parameter on an exported class/interface/type-alias/
+ * function, e.g. the `T` in `interface Box<T>` or the `E` in `type
+ * Result<T, E = unknown>`. Tracked separately from `ParamSurface` (runtime
+ * parameters) -- see `typeParamsNarrowed` for the real break this exists to
+ * catch. */
+interface TypeParamSurface {
+  name: string;
+  hasDefault: boolean;
+}
+
 interface MemberSurface {
   name: string;
   kind: "method" | "property";
@@ -37,6 +47,11 @@ interface ExportSurface {
   members: MemberSurface[];
   paramsText: string | null;
   params: ParamSurface[] | null;
+  /** Generic type parameters declared directly on this export (e.g. the
+   * `<T, E = unknown>` in `type Result<T, E = unknown> = {...}`) -- empty
+   * for non-generic exports and for shapes this differ doesn't resolve type
+   * parameters for (default-export expressions, enums, consts). */
+  typeParams: TypeParamSurface[];
   typeText: string;
 }
 
@@ -184,6 +199,53 @@ function paramNarrowedToRequired(
   for (let i = 0; i < overlap; i++) {
     if (oldList[i].optional && !newList[i].optional) {
       narrowed.push(newList[i]);
+    }
+  }
+  return narrowed;
+}
+
+function collectTypeParams(
+  sf: ts.SourceFile,
+  typeParams: readonly ts.TypeParameterDeclaration[] | undefined,
+): TypeParamSurface[] {
+  if (!typeParams) return [];
+  return typeParams.map((tp) => ({
+    name: textOf(sf, tp.name),
+    hasDefault: !!tp.default,
+  }));
+}
+
+/**
+ * Real breaking change this differ previously had zero visibility into: a
+ * generic type parameter added to an exported `interface`/`type
+ * alias`/`class`/`function` with no default, or an *existing* type
+ * parameter that loses a default it used to have. Both make every usage
+ * that supplies fewer explicit type arguments than the new parameter list
+ * requires a real compile error -- confirmed directly against the real
+ * compiler (`tsc --strict`): adding a second, no-default type parameter to
+ * an exported `type Result<T> = {...}` (even when the only new *member* it
+ * carries is optional, so the existing field-level checks see nothing to
+ * flag) turns `const r: Result<string> = {...}` from valid into a real
+ * `error TS2314: Generic type 'Result' requires 2 type argument(s).` on a
+ * completely unrelated caller. Before this check existed, that exact range
+ * printed "no breaking changes" and let a mislabeled `fix:` through, same
+ * failure class as every other gap found in this file, just for generic
+ * arity instead of runtime parameter arity. Params already at the same
+ * position with a default on both sides are unaffected -- callers that
+ * relied on the default can still omit it.
+ */
+function typeParamsNarrowed(
+  oldParams: TypeParamSurface[],
+  newParams: TypeParamSurface[],
+): TypeParamSurface[] {
+  const narrowed: TypeParamSurface[] = [];
+  if (newParams.length > oldParams.length) {
+    narrowed.push(...newParams.slice(oldParams.length).filter((p) => !p.hasDefault));
+  }
+  const overlap = Math.min(oldParams.length, newParams.length);
+  for (let i = 0; i < overlap; i++) {
+    if (oldParams[i].hasDefault && !newParams[i].hasDefault) {
+      narrowed.push(newParams[i]);
     }
   }
   return narrowed;
@@ -405,6 +467,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       members: classMembers(sf, node),
       paramsText: null,
       params: null,
+      typeParams: collectTypeParams(sf, node.typeParameters),
       typeText: "class",
     };
   }
@@ -416,6 +479,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       members: interfaceMembers(sf, node),
       paramsText: null,
       params: null,
+      typeParams: collectTypeParams(sf, node.typeParameters),
       typeText: "interface",
     };
   }
@@ -427,6 +491,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       members: [],
       paramsText: paramsSignature(sf, node.parameters),
       params: collectParams(sf, node.parameters),
+      typeParams: collectTypeParams(sf, node.typeParameters),
       typeText: textOf(sf, node.type),
     };
   }
@@ -440,6 +505,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       members,
       paramsText: null,
       params: null,
+      typeParams: collectTypeParams(sf, node.typeParameters),
       typeText: textOf(sf, node.type),
     };
   }
@@ -451,6 +517,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       members: enumMembers(sf, node),
       paramsText: null,
       params: null,
+      typeParams: [],
       typeText: "enum",
     };
   }
@@ -464,6 +531,7 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
         members: [],
         paramsText: paramsSignature(sf, init.parameters),
         params: collectParams(sf, init.parameters),
+        typeParams: collectTypeParams(sf, init.typeParameters),
         typeText: textOf(sf, init.type),
       };
     }
@@ -474,10 +542,20 @@ function surfaceFromDeclaration(sf: ts.SourceFile, node: ts.Node, name: string):
       members: [],
       paramsText: null,
       params: null,
+      typeParams: [],
       typeText: node.type ? textOf(sf, node.type) : "inferred",
     };
   }
-  return { name, kind: "unknown", objectShaped: false, members: [], paramsText: null, params: null, typeText: "unknown" };
+  return {
+    name,
+    kind: "unknown",
+    objectShaped: false,
+    members: [],
+    paramsText: null,
+    params: null,
+    typeParams: [],
+    typeText: "unknown",
+  };
 }
 
 /** Find a top-level declaration named `name` anywhere in the file (exported or not). */
@@ -637,6 +715,7 @@ function collectExports(
           members: [],
           paramsText: paramsSignature(sf, expr.parameters),
           params: collectParams(sf, expr.parameters),
+          typeParams: collectTypeParams(sf, expr.typeParameters),
           typeText: textOf(sf, expr.type),
         });
       } else if (ts.isClassExpression(expr)) {
@@ -647,6 +726,7 @@ function collectExports(
           members: classMembers(sf, expr as unknown as ts.ClassDeclaration),
           paramsText: null,
           params: null,
+          typeParams: collectTypeParams(sf, expr.typeParameters),
           typeText: "class",
         });
       } else {
@@ -853,6 +933,16 @@ function diffSurfaces(oldMap: SurfaceMap, newMap: SurfaceMap): ApiChange[] {
           detail: `${name}()'s parameter(s) ${narrowedParams.map((p) => `"${p.name}"`).join(", ")} changed from optional to required — existing callers that omitted them will now fail to type-check.`,
         });
       }
+    }
+
+    const narrowedTypeParams = typeParamsNarrowed(oldSurface.typeParams, newSurface.typeParams);
+    if (narrowedTypeParams.length > 0) {
+      changes.push({
+        kind: "type-param-narrowed",
+        severity: "breaking",
+        symbol: name,
+        detail: `${name}<...> now requires additional type parameter(s) with no default: ${narrowedTypeParams.map((p) => p.name).join(", ")} — existing usages of "${name}" that don't supply them will fail to type-check.`,
+      });
     }
 
     changes.push(...diffMembers(name, oldSurface.members, newSurface.members, newSurface.kind));

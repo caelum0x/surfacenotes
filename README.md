@@ -55,8 +55,13 @@ minor) is summarized in `~/products/plans/surfacenotes.md`.
   optional-to-required or newly-added-required field on an `interface`/`type`
   is breaking, an `enum` member's real effective value changing — including
   the classic "inserted a member above an auto-numbered one and silently
-  renumbered everything after it" footgun — is breaking, everything additive
-  is safe.
+  renumbered everything after it" footgun — is breaking, a generic type
+  parameter added to an exported `interface`/`type alias`/`class`/`function`
+  with no default (or an existing one losing a default it used to have) is
+  breaking — even when the member-level diff sees nothing to flag, e.g. a
+  new *optional* field riding along with the new type parameter — because it
+  raises the number of explicit type arguments a usage like `Result<string>`
+  must supply, everything additive is safe.
 - Writes `CHANGELOG.md` (developer-facing, with commit/PR links) and
   `RELEASE_NOTES.md` (same data, plain language, no hashes) with a
   verification banner at the top of each release. Exits with status `2`
